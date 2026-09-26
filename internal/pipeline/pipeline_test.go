@@ -18,6 +18,8 @@ import (
 	"github.com/huang1234321/thermio-ingest/internal/quality"
 	"github.com/huang1234321/thermio-ingest/internal/tsdb"
 	"github.com/twmb/franz-go/pkg/kgo"
+
+	"github.com/prometheus/client_golang/prometheus/testutil"
 )
 
 // ── 测试底座 ─────────────────────────────────────────────────────────────
@@ -537,5 +539,33 @@ func TestPipelineGracefulDrain(t *testing.T) {
 	defer mu.Unlock()
 	if acks != 5 {
 		t.Errorf("ack = %d, want 5", acks)
+	}
+}
+
+// §10 RED-R 入口速率与 §3.2 seq 缺口计数的防回归断言（评审阻塞项修复配套）：
+// 每条进入 processMessage 的消息计 1（含死信路径）；seq 前进方向缺口计 1。
+// DecodeWorkers=1 保证处理顺序确定（多 worker 下 seq 观测序不定）。
+func TestMetricsMQTTMessagesAndSeqGaps(t *testing.T) {
+	p, _, fw, _, _ := newTestPipeline(t, Config{DecodeWorkers: 1})
+	valid := func(seq int64) mqtt.Inbound {
+		return msg("GW-A", seq, `{"name":"TEMP_F","value":77,"ts":"2026-09-26T14:03:04+08:00"}`)
+	}
+	bad := mqtt.Inbound{ // 信封级死信（observeSeq 之前返回，不计缺口）
+		Topic: "thermio/gw/GW-A/up/data", Payload: []byte(`{"msg_type":"what","ver":1}`), Ack: func() {},
+	}
+	runAndWait(t, p, func(intake chan<- mqtt.Inbound) {
+		intake <- valid(1)
+		intake <- valid(7) // 缺口 2..6 → SeqGaps +1
+		intake <- bad
+		intake <- valid(9) // 缺口 8 → +1
+	})
+	if got := testutil.ToFloat64(p.met.MQTTMessages); got != 4 {
+		t.Errorf("ingest_mqtt_messages_total = %v, want 4（每条进入处理的消息计 1，含死信路径）", got)
+	}
+	if got := testutil.ToFloat64(p.met.SeqGaps); got != 2 {
+		t.Errorf("ingest_gw_seq_gaps_total = %v, want 2（缺口 2..6 与 8）", got)
+	}
+	if got := len(fw.rowsAll()); got != 3 {
+		t.Errorf("合法行 = %d, want 3", got)
 	}
 }

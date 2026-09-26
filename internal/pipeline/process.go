@@ -105,6 +105,9 @@ func newTraceID() string {
 // processMessage §5.1 阶段 2–5 单消息实现。信封级失败整消息 DLQ 后 ack
 // （§3.2 防重投风暴语义）；点位级失败按点 DLQ，合法点不受牵连。
 func (p *Pipeline) processMessage(msg mqtt.Inbound) *processed {
+	// §10 RED-R 入口速率打点：此处 = 成功入队、将被处理的消息。停机窗口
+	// 未入队的消息不 ACK 会重投、下轮计入，口径自洽（ADR-014 触发器数据源）。
+	p.met.MQTTMessages.Inc()
 	now := p.nowFunc().UTC()
 	res := &processed{
 		clientID:   clientIDFromTopic(msg.Topic),
