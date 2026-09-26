@@ -1,0 +1,16 @@
+{
+  "name": "normal-10k",
+  "description": "IMPL-9 场景 1：正常采集万点级。10000 点位、60s 采样、单消息 500 点（契约上限），单位混排（degC/degF/psi/m³/h 喂单位归一），含 5% 枚态量。期望：telemetry 全量落库、quality=0、raw topic 可消费、DLQ 零增长。",
+  "duration_s": 300,
+  "gateways": { "count": 1 },
+  "points": {
+    "count": 10000,
+    "numeric_ratio": 0.95,
+    "units": ["degC", "degF", "kPa", "psi", "kW", "%", "m³/h"],
+    "base": 20, "amplitude": 5, "noise": 0.2,
+    "setpoints": 20, "setpoint_base": 21
+  },
+  "sample_interval_s": 60,
+  "batch_points": 500,
+  "downlink": { "enabled": true, "readback": "echo" }
+}

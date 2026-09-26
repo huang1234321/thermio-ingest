@@ -1,0 +1,10 @@
+{
+  "name": "ts-beyond-retention",
+  "description": "DLQ TS_BEYOND_RETENTION。每 2 条消息首点 ts 置为 3 年前（> now − 2 年防线）。期望：不写库、DLQ 留档 + 计数（防落即删僵尸 chunk）。",
+  "duration_s": 120,
+  "gateways": { "count": 1 },
+  "points": { "count": 50, "numeric_ratio": 1, "units": ["degC"], "base": 20, "amplitude": 1, "noise": 0.1 },
+  "sample_interval_s": 5,
+  "batch_points": 50,
+  "faults": { "ts_beyond_retention_every": 2 }
+}

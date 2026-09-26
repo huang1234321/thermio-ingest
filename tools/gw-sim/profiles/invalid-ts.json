@@ -1,0 +1,10 @@
+{
+  "name": "invalid-ts",
+  "description": "DLQ TS_INVALID。每 2 条消息首点 ts 置为不可解析字符串。期望：该点 DLQ（点级，非整消息），其余点正常。",
+  "duration_s": 120,
+  "gateways": { "count": 1 },
+  "points": { "count": 50, "numeric_ratio": 1, "units": ["degC"], "base": 20, "amplitude": 1, "noise": 0.1 },
+  "sample_interval_s": 5,
+  "batch_points": 50,
+  "faults": { "invalid_ts_every": 2 }
+}

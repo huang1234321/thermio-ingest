@@ -1,0 +1,10 @@
+{
+  "name": "oversize-points",
+  "description": "IMPL-6 超长 payload（点数形态）。每 2 条消息膨胀到 >500 点（契约上限 500）。期望：整消息 DLQ PAYLOAD_TOO_LARGE 后照常 PUBACK（防重投风暴）。",
+  "duration_s": 120,
+  "gateways": { "count": 1 },
+  "points": { "count": 50, "numeric_ratio": 1, "units": ["degC"], "base": 20, "amplitude": 1, "noise": 0.1 },
+  "sample_interval_s": 5,
+  "batch_points": 50,
+  "faults": { "oversize_every": 2, "oversize_mode": "points" }
+}

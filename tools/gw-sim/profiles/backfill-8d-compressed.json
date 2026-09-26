@@ -1,0 +1,10 @@
+{
+  "name": "backfill-8d-compressed",
+  "description": "IMPL-9 场景 4b：补传落入已压缩 chunk。回放 8 天（> TSDB 7 天压缩策略窗口，db/migrations/tsdb/0003），step 1h。期望：自动解压写入成功（ddl.md §8 用例 11 语义），其余同 backfill-3d。",
+  "duration_s": 300,
+  "gateways": { "count": 1 },
+  "points": { "count": 200, "numeric_ratio": 1, "units": ["degC"], "base": 12, "amplitude": 4, "noise": 0.2 },
+  "sample_interval_s": 60,
+  "batch_points": 200,
+  "backfill": { "enabled": true, "days": 8, "step_s": 3600, "publish_interval_ms": 20 }
+}

@@ -1,0 +1,10 @@
+{
+  "name": "malformed-json",
+  "description": "DLQ MALFORMED_JSON。每 2 条消息发送截断的非法 JSON 字节。期望：解码失败进 DLQ，连接不断（PUBACK 照常）。",
+  "duration_s": 120,
+  "gateways": { "count": 1 },
+  "points": { "count": 50, "numeric_ratio": 1, "units": ["degC"], "base": 20, "amplitude": 1, "noise": 0.1 },
+  "sample_interval_s": 5,
+  "batch_points": 50,
+  "faults": { "malformed_every": 2 }
+}

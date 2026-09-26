@@ -1,0 +1,10 @@
+{
+  "name": "offline-buffer-retransmit",
+  "description": "IMPL-6 断网补传（实时窗口形态）。启动 30s 后主动断链 120s：断链期间采样继续进本地缓存；窗口结束重连，按原始 ts/seq FIFO 重发。期望：窗口内数据不丢、ts 为采集原始时刻（非重发时刻）、seq 连续无缺口、backfill 位置位（ts 距接收 >10min 时）。",
+  "duration_s": 300,
+  "gateways": { "count": 1 },
+  "points": { "count": 100, "numeric_ratio": 1, "units": ["degC"], "base": 20, "amplitude": 1, "noise": 0.1 },
+  "sample_interval_s": 5,
+  "batch_points": 100,
+  "offline": { "windows": [ { "after_s": 30, "duration_s": 120 } ], "buffer_max_rows": 100000 }
+}

@@ -1,0 +1,10 @@
+{
+  "name": "backfill-3d",
+  "description": "IMPL-9 场景 4：断网 3 天补传。启动即回放过去 3 天历史（step 5min），ts=历史采集时刻、sent_at=补传发送时刻。期望：原始 ts 乱序入库、backfill 位（bit8）置位、同网关 Kafka 同分区保序、DLQ 零。",
+  "duration_s": 300,
+  "gateways": { "count": 1 },
+  "points": { "count": 100, "numeric_ratio": 1, "units": ["degC"], "base": 12, "amplitude": 4, "noise": 0.2 },
+  "sample_interval_s": 60,
+  "batch_points": 100,
+  "backfill": { "enabled": true, "days": 3, "step_s": 300, "publish_interval_ms": 20 }
+}

@@ -1,0 +1,10 @@
+{
+  "name": "unregistered-points",
+  "description": "IMPL-9 场景 3 / IMPL-6 未知点。每 2 条消息夹带 3 个未注册点（UNREGISTERED_PT_*）。期望：已知点正常入库，未注册点逐点 DLQ UNREGISTERED_POINT，ingest_unregistered_points_total 递增。",
+  "duration_s": 120,
+  "gateways": { "count": 1 },
+  "points": { "count": 100, "numeric_ratio": 1, "units": ["degC"], "base": 20, "amplitude": 1, "noise": 0.1 },
+  "sample_interval_s": 5,
+  "batch_points": 100,
+  "faults": { "unknown_points_every": 2, "unknown_points_count": 3 }
+}

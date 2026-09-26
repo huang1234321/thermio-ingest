@@ -1,0 +1,10 @@
+{
+  "name": "emqx-restart-window",
+  "description": "IMPL-9 场景 6：EMQX 重启窗口（会话保持 ≥1h）。长稳发布（duration 0 = 直到 SIGINT，建议 -duration 70m）；clean_session=false + QoS1，broker 重启期间发布失败进缓存、恢复后按原始 ts/seq 顺序重放。重启 EMQX 由外部执行：docker restart thermio-emqx。",
+  "duration_s": 0,
+  "gateways": { "count": 1 },
+  "points": { "count": 200, "numeric_ratio": 1, "units": ["degC"], "base": 20, "amplitude": 2, "noise": 0.1 },
+  "sample_interval_s": 1,
+  "batch_points": 200,
+  "offline": { "buffer_max_rows": 1000000 }
+}

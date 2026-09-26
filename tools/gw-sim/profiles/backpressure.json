@@ -1,0 +1,10 @@
+{
+  "name": "backpressure",
+  "description": "IMPL-9 场景 5：背压。20 网关 × 500 点 × 1s 采样 ≈ 10k 行/s 持续灌入，超出单批消化能力。期望：BUFFER_MAX_ROWS 打满 → TCP 背压向上传导，gw-sim 侧发布超时进缓存重试不丢数；恢复后自动排水；ingest 不 OOM。",
+  "duration_s": 120,
+  "gateways": { "count": 20 },
+  "points": { "count": 500, "numeric_ratio": 1, "units": ["degC"], "base": 20, "amplitude": 1, "noise": 0.1 },
+  "sample_interval_s": 1,
+  "batch_points": 500,
+  "offline": { "buffer_max_rows": 2000000 }
+}

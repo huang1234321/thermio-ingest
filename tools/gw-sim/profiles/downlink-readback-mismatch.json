@@ -1,0 +1,13 @@
+{
+  "name": "downlink-readback-mismatch",
+  "description": "IMPL-6 回读不一致故障注入（供 IMPL-18 回滚演练）。readback=pinned：写应答仍 ok（模拟网关/设备层接受），但回读恒为 20（≠写入值）→ 中台写后回读验证必失败，触发重试/回写原值路径。对比 profile：downlink-echo。",
+  "duration_s": 0,
+  "gateways": { "count": 1 },
+  "points": {
+    "count": 100, "numeric_ratio": 1, "units": ["degC"], "base": 20, "amplitude": 1, "noise": 0.1,
+    "setpoints": 20, "setpoint_base": 21, "write_min": 0, "write_max": 100
+  },
+  "sample_interval_s": 5,
+  "batch_points": 120,
+  "downlink": { "enabled": true, "readback": "pinned", "readback_pinned_value": 20 }
+}

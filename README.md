@@ -10,7 +10,8 @@ thermio 数据管道服务（Go，ADR-001/016）：**MQTT in → TimescaleDB / K
 IMPL-5 管线 MVP（DAT-108）：MQTT → TSDB/Kafka 全链路——共享订阅、§3.2 字段规则、
 配置缓存（增量 30s + 全量 1h + 失败保旧）、单位归一 v1、L1b 质量标记、stale 扫描、
 批量写入（TSDB → Kafka → PUBACK）、背压、DLQ 全 reason、指标全套、优雅退出。
-后置项（ingest.md §5.3/§9）：L2 统计检测（bit6/7）、DLQ 重放工具（v2）、gw-sim（IMPL-6）。
+网关模拟器 `tools/gw-sim`（IMPL-6，DAT-109）已就绪，供管线联调与 IMPL-9 E2E 驱动。
+后置项（ingest.md §5.3/§9）：L2 统计检测（bit6/7）、DLQ 重放工具（v2）。
 
 ## 处理管线（ingest.md §5/§7）
 
@@ -44,6 +45,7 @@ db/
   bootstrap/           TSDB 角色 bootstrap（迁移前置，不入版本链）
   migrations/tsdb/     迁移链 0001–0004（蓝本 ddl.md v1.2 §11）
 scripts/               迁移冒烟 + 集成测试编排（自起独立 compose 栈）
+tools/gw-sim/          网关模拟器（IMPL-6：场景 profile + 故障注入 + 下行回读模拟）
 ```
 
 依赖钉版本（ADR-016 指定）：`paho.mqtt.golang` / `franz-go` / `pgx v5`；

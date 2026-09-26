@@ -1,0 +1,10 @@
+{
+  "name": "oversize-bytes",
+  "description": "IMPL-6 超长 payload（字节形态）。每 2 条消息附 >256KB 填充字段（契约总量上限 256KB）。期望：同 oversize-points，DLQ PAYLOAD_TOO_LARGE。",
+  "duration_s": 120,
+  "gateways": { "count": 1 },
+  "points": { "count": 50, "numeric_ratio": 1, "units": ["degC"], "base": 20, "amplitude": 1, "noise": 0.1 },
+  "sample_interval_s": 5,
+  "batch_points": 50,
+  "faults": { "oversize_every": 2, "oversize_mode": "bytes" }
+}
