@@ -1,0 +1,13 @@
+{
+  "name": "downlink-echo",
+  "description": "IMPL-6 下行通道（正常链路）。订阅 down/#：write_cmd → up/event 应答 write_ack(ok)；read_cmd → read_ack，回读=写入值（echo）。设定值点位 SIM_SP_0000..0019，写入域 [0,100]。写生效后遥测跟随新值（up/data 可验证）。",
+  "duration_s": 0,
+  "gateways": { "count": 1 },
+  "points": {
+    "count": 100, "numeric_ratio": 1, "units": ["degC"], "base": 20, "amplitude": 1, "noise": 0.1,
+    "setpoints": 20, "setpoint_base": 21, "write_min": 0, "write_max": 100
+  },
+  "sample_interval_s": 5,
+  "batch_points": 120,
+  "downlink": { "enabled": true, "readback": "echo" }
+}

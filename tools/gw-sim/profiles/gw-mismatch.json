@@ -1,0 +1,10 @@
+{
+  "name": "gw-mismatch",
+  "description": "IMPL-6 错 gw 字段（GW_MISMATCH）。每 2 条消息 payload.gw 置为他人序列号（topic clientid 不变）。期望：整消息 DLQ GW_MISMATCH（安全关注项），正常消息不受影响。",
+  "duration_s": 120,
+  "gateways": { "count": 1 },
+  "points": { "count": 50, "numeric_ratio": 1, "units": ["degC"], "base": 20, "amplitude": 1, "noise": 0.1 },
+  "sample_interval_s": 5,
+  "batch_points": 50,
+  "faults": { "gw_mismatch_every": 2 }
+}

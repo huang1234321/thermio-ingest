@@ -1,0 +1,10 @@
+{
+  "name": "ingest-rolling-restart",
+  "description": "IMPL-9 场景 7：ingest 滚动重启不丢真相源数据。长稳发布（duration 0 = 直到 SIGINT）；重启 ingest 由外部执行。EMQX 会话（clean_session=false）+ QoS1 未 ACK 重投 + gw-sim 缓存重试三重保障；验收口径：重启窗口前后 TSDB 行数差 = 采样行数（无丢失）。",
+  "duration_s": 0,
+  "gateways": { "count": 2 },
+  "points": { "count": 300, "numeric_ratio": 1, "units": ["degC"], "base": 20, "amplitude": 2, "noise": 0.1 },
+  "sample_interval_s": 1,
+  "batch_points": 300,
+  "offline": { "buffer_max_rows": 1000000 }
+}

@@ -1,0 +1,10 @@
+{
+  "name": "seq-gap",
+  "description": "IMPL-6 seq 缺口。每 3 条消息跳 5 个序号。期望：消息照常入库（缺口不拒收），ingest 记 seq 缺口指标与 WARN。",
+  "duration_s": 120,
+  "gateways": { "count": 1 },
+  "points": { "count": 50, "numeric_ratio": 1, "units": ["degC"], "base": 20, "amplitude": 1, "noise": 0.1 },
+  "sample_interval_s": 5,
+  "batch_points": 50,
+  "faults": { "seq_gap_every": 3, "seq_gap_size": 5 }
+}

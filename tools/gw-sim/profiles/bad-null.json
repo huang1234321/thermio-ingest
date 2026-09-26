@@ -1,0 +1,14 @@
+{
+  "name": "bad-null",
+  "description": "IMPL-9 场景 2 / IMPL-6 坏点率与 null 值。10% 点 quality=bad（bit1 device_bad）、5% uncertain、20% 数值 null（bit2 null_value）。期望：数据不丢、相应质量位置位、quality 事件与 DLQ 无增长。",
+  "duration_s": 120,
+  "gateways": { "count": 1 },
+  "points": { "count": 200, "numeric_ratio": 0.8, "units": ["degC"], "base": 7, "amplitude": 2, "noise": 0.1 },
+  "sample_interval_s": 5,
+  "batch_points": 200,
+  "faults": {
+    "bad_quality_rate": 0.10,
+    "uncertain_quality_rate": 0.05,
+    "null_value_rate": 0.20
+  }
+}

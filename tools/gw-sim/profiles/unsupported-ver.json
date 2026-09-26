@@ -1,0 +1,10 @@
+{
+  "name": "unsupported-ver",
+  "description": "DLQ UNSUPPORTED_VER。每 2 条消息 ver 置为 2。期望：消费端不猜，整消息 DLQ。",
+  "duration_s": 120,
+  "gateways": { "count": 1 },
+  "points": { "count": 50, "numeric_ratio": 1, "units": ["degC"], "base": 20, "amplitude": 1, "noise": 0.1 },
+  "sample_interval_s": 5,
+  "batch_points": 50,
+  "faults": { "unsupported_ver_every": 2 }
+}

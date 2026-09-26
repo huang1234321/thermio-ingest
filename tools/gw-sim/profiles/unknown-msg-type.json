@@ -1,0 +1,10 @@
+{
+  "name": "unknown-msg-type",
+  "description": "DLQ UNKNOWN_MSG_TYPE。每 2 条消息 msg_type 置为 firmware_status。期望：前向兼容拒绝进 DLQ，正常消息不受影响。",
+  "duration_s": 120,
+  "gateways": { "count": 1 },
+  "points": { "count": 50, "numeric_ratio": 1, "units": ["degC"], "base": 20, "amplitude": 1, "noise": 0.1 },
+  "sample_interval_s": 5,
+  "batch_points": 50,
+  "faults": { "unknown_msg_type_every": 2 }
+}

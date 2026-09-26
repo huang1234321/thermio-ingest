@@ -1,0 +1,10 @@
+{
+  "name": "ts-skew",
+  "description": "IMPL-6 时钟偏移（网关钟快 15 分钟 > bit5 阈值 10 分钟）。ts 与 sent_at 同步偏移。期望：数据入库不拒，quality 置 bit5 ts_skew，ts_skew 质量事件发出。",
+  "duration_s": 120,
+  "gateways": { "count": 1 },
+  "points": { "count": 50, "numeric_ratio": 1, "units": ["degC"], "base": 20, "amplitude": 1, "noise": 0.1 },
+  "sample_interval_s": 5,
+  "batch_points": 50,
+  "faults": { "ts_skew_s": 900 }
+}
