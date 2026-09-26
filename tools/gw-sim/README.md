@@ -33,11 +33,27 @@ go run . -profile profiles/normal-10k.json -summary-file /tmp/run.json
 禁止连宿主机既有 MQTT/Kafka/PG/EMQX。
 
 **dev compose 当前为 EMQX 内置认证/匿名模式**（IMPL-8 钩子模式开关未落），
-为 gw-sim 预置与真实链路同形的账号（以 dashboard 或管理 API 建用户）：
+为 gw-sim 预置与真实链路同形的账号。注意 EMQX 5.x 开源版**无 `emqx ctl users`
+子命令**（5.8.3 CE 实测），用户管理走 dashboard（`http://localhost:18083`，
+默认 admin/public →「访问控制 → 认证」建内置数据库用户）或等价管理 API：
 
 ```bash
-docker exec -it thermio-emqx emqx ctl users add \
-  "GWSIM001@tenant-sim" "$GWSIM_MQTT_PASSWORD"
+# 管理 API 路径（dashboard 登录取 token → 建内置数据库认证器 → 建用户；
+# token 与口令按环境自定，此处仅示意调用形态）
+TOKEN=$(curl -s -X POST http://localhost:18083/api/v5/login \
+  -H 'content-type: application/json' \
+  -d '{"username":"admin","password":"public"}' | python3 -c 'import sys,json;print(json.load(sys.stdin)["token"])')
+
+curl -s -X POST http://localhost:18083/api/v5/authentication \
+  -H "authorization: Bearer $TOKEN" -H 'content-type: application/json' \
+  -d '{"backend":"built_in_database","mechanism":"password_based",
+       "password_hash_algorithm":{"name":"sha256","salt_position":"suffix"},
+       "user_id_type":"username","enable":true}'
+
+curl -s -X POST \
+  http://localhost:18083/api/v5/authentication/password_based%3Abuilt_in_database/users \
+  -H "authorization: Bearer $TOKEN" -H 'content-type: application/json' \
+  -d '{"user_id":"GWSIM001@tenant-sim","password":"'"$GWSIM_MQTT_PASSWORD"'","is_superuser":false}'
 ```
 
 IMPL-7/8 落地后：凭证改由平台 `POST /internal/mqtt/authenticate` 链路注册

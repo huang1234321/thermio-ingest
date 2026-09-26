@@ -96,7 +96,7 @@ func (in *Injector) Apply(env *Envelope, now time.Time) ([]byte, bool, error) {
 	}
 
 	// 夹带未注册点（UNREGISTERED_POINT）。
-	if in.cfg.UnknownPointsEvery > 0 && n%int64(in.cfg.UnknownPointsEvery) == 0 {
+	if in.cfg.UnknownPointsEvery > 0 && n%int64(in.cfg.UnknownPointsEvery) == 0 && len(env.Points) > 0 {
 		for k := 0; k < in.cfg.UnknownPointsCount; k++ {
 			v := 1.0
 			env.Points = append(env.Points, Point{
@@ -132,7 +132,7 @@ func (in *Injector) Apply(env *Envelope, now time.Time) ([]byte, bool, error) {
 	}
 
 	// 超限（PAYLOAD_TOO_LARGE：>500 点 或 >256KB）。
-	if in.cfg.OversizeEvery > 0 && n%int64(in.cfg.OversizeEvery) == 0 {
+	if in.cfg.OversizeEvery > 0 && n%int64(in.cfg.OversizeEvery) == 0 && len(env.Points) > 0 {
 		switch in.cfg.OversizeMode {
 		case "points":
 			for len(env.Points) <= decode.MaxPoints {

@@ -429,7 +429,7 @@ func (g *gatewaySim) samplePoint(pd pointDef, at time.Time) Point {
 	return p
 }
 
-// noise 高斯近似噪声（两次均匀平均，够模拟用）。
+// noise 单次均匀噪声，幅度 ±amp（模拟用途足够，无高斯必要）。
 func (g *gatewaySim) noise(r *rand.Rand, amp float64) float64 {
 	if amp <= 0 {
 		return 0
