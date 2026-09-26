@@ -27,6 +27,8 @@ const (
 	UnregisteredPointsTotal = "ingest_unregistered_points_total" // counter
 	// §3.2 seq 规则「缺口只记指标与 WARN」的指标落点（§8 面板数据源，增量新增）。
 	SeqGapsTotal = "ingest_gw_seq_gaps_total" // counter
+	// stale 质量事件 produce 失败计数（DAT-121：失败不吞，WARN + 指标）。
+	QualityProduceFailuresTotal = "ingest_quality_produce_failures_total" // counter
 )
 
 // Metrics 全套 collector。零值不可用，经 New 构建。
@@ -39,6 +41,8 @@ type Metrics struct {
 	SeqGaps      prometheus.Counter
 	Unregistered prometheus.Counter
 	TSDBFailures prometheus.Counter
+
+	QualityProduceFailures prometheus.Counter
 
 	PipelineLatency     prometheus.Histogram
 	TSDBWriteLatency    prometheus.Histogram
@@ -72,6 +76,8 @@ func New(bufferRows, backpressureActive, configCachePoints, configRefreshAge fun
 		Unregistered: prometheus.NewCounter(prometheus.CounterOpts{Name: UnregisteredPointsTotal, Help: "未注册点早期信号（注册漏配）"}),
 		TSDBFailures: prometheus.NewCounter(prometheus.CounterOpts{Name: TSDBWriteFailuresTotal, Help: "TSDB 批量写失败（重试耗尽）"}),
 
+		QualityProduceFailures: prometheus.NewCounter(prometheus.CounterOpts{Name: QualityProduceFailuresTotal, Help: "stale 质量事件 produce 失败数（stale_set/stale_cleared 直发路径）"}),
+
 		PipelineLatency:     prometheus.NewHistogram(prometheus.HistogramOpts{Name: PipelineLatencyMS, Help: "MQTT 收到 → TSDB 落库（ms）", Buckets: prometheus.ExponentialBuckets(1, 2, 14)}),
 		TSDBWriteLatency:    prometheus.NewHistogram(prometheus.HistogramOpts{Name: TSDBWriteLatencyMS, Help: "TSDB 批量写耗时（ms）；P99>500 触发扩容/分片（ADR-014）", Buckets: prometheus.ExponentialBuckets(1, 2, 14)}),
 		KafkaProduceLatency: prometheus.NewHistogram(prometheus.HistogramOpts{Name: KafkaProduceLatencyMS, Help: "Kafka produce 耗时（ms）", Buckets: prometheus.ExponentialBuckets(1, 2, 14)}),
@@ -83,6 +89,7 @@ func New(bufferRows, backpressureActive, configCachePoints, configRefreshAge fun
 	}
 
 	m.Registry.MustRegister(m.MQTTMessages, m.Points, m.DLQ, m.SeqGaps, m.Unregistered, m.TSDBFailures,
+		m.QualityProduceFailures,
 		m.PipelineLatency, m.TSDBWriteLatency, m.KafkaProduceLatency,
 		m.BufferRows, m.BackpressureActive, m.ConfigCachePoints, m.ConfigRefreshAge)
 	// Go 运行时基线（部署.md 资源预算口径：ingest 128MB）。

@@ -2,6 +2,7 @@
 package pipeline
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -293,6 +294,18 @@ func qualityRecord(gatewayID, tenantID string, pointID int64, ts time.Time, even
 		kgo.RecordHeader{Key: kafkaproducer.HeaderTraceID, Value: []byte(traceID)},
 	)
 	return rec
+}
+
+// produceQualityEvent 直发单条质量事件（stale_set / stale_cleared，产生于写入
+// 周期之外，不随批走）。失败不吞（CODE-ST-01，DAT-121）：WARN + 指标——事件非
+// 真相源（遥测已在 TSDB），不进 DLQ、不重试。
+func (p *Pipeline) produceQualityEvent(rec *kgo.Record) {
+	pctx, cancel := context.WithTimeout(context.Background(), p.cfg.ProduceTimeout)
+	defer cancel()
+	if err := p.kafka.Produce(pctx, rec); err != nil {
+		p.met.QualityProduceFailures.Inc()
+		p.log.Warn("quality event produce failed", "topic", rec.Topic, "key", string(rec.Key), "err", err.Error())
+	}
 }
 
 // observeSeq §3.2：seq 缺口只记指标与 WARN（QoS1 丢包兜底检测），不拒收；

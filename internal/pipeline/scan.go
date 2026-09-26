@@ -28,9 +28,7 @@ func (p *Pipeline) runStaleScanner(ctx context.Context) {
 				rec := qualityRecord(pc.GatewayID, pc.TenantID, pc.PointID, now,
 					quality.EventStaleSet,
 					map[string]any{"stale_timeout_s": pc.StaleTimeoutS}, newTraceID())
-				pctx, cancel := context.WithTimeout(context.Background(), p.cfg.ProduceTimeout)
-				_ = p.kafka.Produce(pctx, rec)
-				cancel()
+				p.produceQualityEvent(rec)
 			}
 		}
 	}
