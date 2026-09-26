@@ -1,0 +1,76 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.14.0 # go1.27 构建，与本地验证同版
+      - name: gofmt
+        run: test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: go vet ./...
+      - run: go test -race ./...
+
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: 静态二进制（CGO_ENABLED=0，私有化交付形态）
+        run: |
+          CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags "-s -w" -o /tmp/ingestd ./cmd/ingestd
+          file /tmp/ingestd
+          file /tmp/ingestd | grep -q "statically linked"
+      - name: 全模块编译
+        run: go build ./...
+
+  tsdb-migration-smoke:
+    runs-on: ubuntu-latest
+    services:
+      tsdb:
+        # deploy.md dev compose 钉版（环境隔离：一次性容器，跑完即弃）
+        image: timescale/timescaledb:2.17.2-pg16
+        env:
+          # 一次性 CI 容器的管理员口令（非真实凭证）；三角色口令由脚本运行时随机生成
+          POSTGRES_PASSWORD: ci-throwaway-tsdb
+          POSTGRES_DB: thermio_ts
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d thermio_ts"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      TSDB_HOST: localhost
+      TSDB_PORT: "5432"
+      TSDB_SUPER_PASSWORD: ci-throwaway-tsdb
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: install goose（与 ddl.md §8.1 复验同版）
+        run: go install github.com/pressly/goose/v3/cmd/goose@v3.24.0
+      - name: 迁移链冒烟（up → §8 用例 8–11 → down-to 0 → up）
+        run: scripts/tsdb-migration-smoke.sh
