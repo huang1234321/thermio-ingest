@@ -1,10 +1,18 @@
 // Package mqtt 负责 EMQX 接入（ingest.md §2）：共享订阅
-// `$share/ingest/thermio/gw/+/up/data`，MQTT 3.1.1 + QoS 1。
-// 订阅循环与 handler 接线随 IMPL-5 落地；本文件冻结 topic 契约与客户端选项基线。
+// `$share/ingest/thermio/gw/+/up/data`，MQTT 3.1.1 + QoS 1，会话不清除
+// （重启窗口内消息由 EMQX 会话保持），手动 ACK（PUBACK 在 TSDB → Kafka 落定
+// 之后由管线尾部触发，§7.1）。
+//
+// 背压机制（§7.3）：handler 在 paho 路由 goroutine 内同步执行（Order=true），
+// 投递到有界 intake 队列时阻塞 → 客户端停读 socket → TCP 背压 → EMQX inflight
+// 窗口暂停投递。全链路无人为丢弃。
 package mqtt
 
 import (
+	"context"
 	"fmt"
+	"sync"
+	"time"
 
 	paho "github.com/eclipse/paho.mqtt.golang"
 )
@@ -36,4 +44,96 @@ func NewClientOptions(brokerURL, clientID, username, password string) *paho.Clie
 	o.SetCleanSession(false)
 	o.SetAutoAckDisabled(true)
 	return o
+}
+
+// Inbound 一条上行消息的管线视图（payload 拷贝出 paho 缓冲，Ack 幂等安全）。
+type Inbound struct {
+	Topic      string
+	Payload    []byte
+	Ack        func() // 幂等；多次调用只发一次 PUBACK
+	ReceivedAt time.Time
+}
+
+// Source 共享订阅源。Handler 在 paho 路由 goroutine 内被调用——只做入队，
+// 阻塞即背压（§7.3）。
+type Source struct {
+	client paho.Client
+	topic  string
+	queue  chan<- Inbound
+
+	stopCh  chan struct{} // 关闭后 handler 不再入队（消息留给 EMQX 会话重投）
+	stopped sync.Once
+	handWG  sync.WaitGroup
+}
+
+// NewSource queue 为有界 intake 队列（§5.1 10k 消息）。
+func NewSource(queue chan<- Inbound) *Source {
+	return &Source{queue: queue, stopCh: make(chan struct{})}
+}
+
+// Start 连接并订阅。断线由 paho AutoReconnect（默认开）自动重连，OnConnect
+// 回调幂等重订阅。初始连接失败返回错误，由调用方重试（启动期 fail-fast）。
+func (s *Source) Start(_ context.Context, brokerURL, clientID, username, password, group string) error {
+	s.topic = SharedTopic(group)
+	opts := NewClientOptions(brokerURL, clientID, username, password)
+	opts.SetConnectTimeout(30 * time.Second)
+	opts.SetOnConnectHandler(func(_ paho.Client) {
+		// 每次连接建立（含重连）都重订阅：CleanSession=false 下重复 SUBSCRIBE
+		// 幂等；漏订阅比重复订阅危险。
+		tok := s.client.Subscribe(s.topic, 1, s.onMessage)
+		_ = tok.WaitTimeout(30 * time.Second)
+	})
+	s.client = paho.NewClient(opts)
+	tok := s.client.Connect()
+	if tok.Wait() && tok.Error() != nil {
+		return fmt.Errorf("mqtt connect %s: %w", brokerURL, tok.Error())
+	}
+	return nil
+}
+
+// onMessage paho handler：同步入队（满则阻塞 → TCP 背压）；停机窗口直接
+// 返回（不 ACK，消息留在 EMQX 会话，重启后重投）。
+func (s *Source) onMessage(_ paho.Client, msg paho.Message) {
+	s.handWG.Add(1)
+	defer s.handWG.Done()
+	select {
+	case <-s.stopCh:
+		return // 停机窗口：不 ACK，交给会话重投
+	default:
+	}
+	payload := make([]byte, len(msg.Payload()))
+	copy(payload, msg.Payload())
+	var ackOnce sync.Once
+	in := Inbound{
+		Topic:      msg.Topic(),
+		Payload:    payload,
+		ReceivedAt: time.Now().UTC(),
+		Ack: func() {
+			ackOnce.Do(func() { msg.Ack() })
+		},
+	}
+	// 阻塞入队 = 背压传导（§7.3）。停机信号优先于入队，防死锁。
+	select {
+	case s.queue <- in:
+	case <-s.stopCh:
+	}
+}
+
+// Shutdown 停订阅 → 等在途 handler 退出。未 ACK 的 QoS1 消息由 EMQX 会话保持
+// （§2），下次启动重投——at-least-once。
+func (s *Source) Shutdown() {
+	s.stopped.Do(func() { close(s.stopCh) })
+	if s.client != nil && s.client.IsConnected() {
+		if tok := s.client.Unsubscribe(s.topic); tok.WaitTimeout(10 * time.Second) {
+			_ = tok.Error()
+		}
+	}
+	s.handWG.Wait()
+}
+
+// Disconnect 关闭连接（Shutdown 之后调用；等待 500ms 让 PUBACK/UNSUB 落网）。
+func (s *Source) Disconnect() {
+	if s.client != nil && s.client.IsConnected() {
+		s.client.Disconnect(500)
+	}
 }
