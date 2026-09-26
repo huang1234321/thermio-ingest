@@ -5,14 +5,15 @@ import (
 )
 
 // 指标名唯一且全部带 ingest_ 域前缀（ingest.md §10 / OBS-MT-04）。
-// §10 表 12 项 + §3.2/§8 要求的 seq 缺口计数 = 13（只增不改）。
+// §10 表 12 项 + §3.2/§8 要求的 seq 缺口计数 + 质量事件 produce 失败计数
+// = 14（只增不改）。
 func TestNames(t *testing.T) {
 	all := []string{
 		MQTLMessagesTotal, PointsTotal, DLQMessagesTotal,
 		PipelineLatencyMS, TSDBWriteLatencyMS, TSDBWriteFailuresTotal,
 		KafkaProduceLatencyMS, BufferRows, BackpressureActive,
 		ConfigCachePoints, ConfigRefreshAgeSeconds, UnregisteredPointsTotal,
-		SeqGapsTotal,
+		SeqGapsTotal, QualityProduceFailuresTotal,
 	}
 	seen := make(map[string]bool, len(all))
 	for _, n := range all {
@@ -21,8 +22,8 @@ func TestNames(t *testing.T) {
 		}
 		seen[n] = true
 	}
-	if len(all) != 13 {
-		t.Errorf("指标共 %d 条, want 13（§10 表 12 项 + seq 缺口计数）", len(all))
+	if len(all) != 14 {
+		t.Errorf("指标共 %d 条, want 14（§10 表 12 项 + seq 缺口 + 质量事件 produce 失败）", len(all))
 	}
 }
 

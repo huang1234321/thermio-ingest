@@ -109,7 +109,12 @@ func (p *Pipeline) flush(b *batch) {
 	})
 
 	start := p.nowFunc()
-	err := p.tsdb.WriteBatch(context.Background(), rows)
+	// 批写超时（DAT-121）：与 Kafka 侧 ProduceTimeout 对称——TSDB 挂起不得让
+	// writer 永久阻塞（PUBACK 不发、背压顶死）；超时走下方 TSDB_WRITE_FAILED
+	// 死信路径兜底（upsert 幂等，重放不重复）。
+	writeCtx, writeCancel := context.WithTimeout(context.Background(), p.cfg.TsdbWriteTimeout)
+	err := p.tsdb.WriteBatch(writeCtx, rows)
+	writeCancel()
 	p.met.TSDBWriteLatency.Observe(float64(p.nowFunc().Sub(start).Milliseconds()))
 
 	produceCtx, cancel := context.WithTimeout(context.Background(), p.cfg.ProduceTimeout)
@@ -141,9 +146,7 @@ func (p *Pipeline) flush(b *batch) {
 	// stale 观测（§6.3）：TSDB 落库成功才推进 lastTS；解除事件即时补发。
 	for i := range b.works {
 		if cleared := p.staleObserve(b.works[i].stale); cleared != nil {
-			ctx2, cancel2 := context.WithTimeout(context.Background(), p.cfg.ProduceTimeout)
-			_ = p.kafka.Produce(ctx2, cleared)
-			cancel2()
+			p.produceQualityEvent(cleared)
 		}
 	}
 

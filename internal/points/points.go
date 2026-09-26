@@ -2,6 +2,8 @@
 // gateway 两表（thermio_ingest 旁路只读角色，ddl.md §5.1）；增量刷新 30s
 // （updated_at 游标）+ 全量重对齐 1h（防 cursor 漂移）+ 刷新失败保旧缓存继续
 // 服务（配置新鲜度指标暴露年龄，不用缓存年龄硬拒绝数据）。
+// 取数在锁外且带 loadTimeout 上界（DAT-121）：DSN 无 statement_timeout，PG
+// 挂起（非快速失败）时不得阻塞热路径读，也不得让刷新/首版加载无限悬挂。
 package points
 
 import (
@@ -54,8 +56,20 @@ type Cache struct {
 	cursor        time.Time // 增量游标 = 见过的最大 updated_at
 	lastRefreshAt time.Time // 成功刷新时刻（配置新鲜度指标源）
 
-	loader Loader
-	log    *slog.Logger
+	loadTimeout time.Duration // 单轮取数上界（默认 defaultLoadTimeout）
+	loader      Loader
+	log         *slog.Logger
+}
+
+// defaultLoadTimeout 单轮取数超时：增量刷间隔 30s，上界取其半——挂起时每轮
+// 必失败保旧、下一轮再试，同时不把刷新循环长期钉死在一次挂起上。
+const defaultLoadTimeout = 15 * time.Second
+
+// SetLoadTimeout 覆盖取数超时（测试用；非正值忽略）。
+func (c *Cache) SetLoadTimeout(d time.Duration) {
+	if d > 0 {
+		c.loadTimeout = d
+	}
 }
 
 // Loader 一次增量/全量数据拉取（消费侧小接口，GO-06；PG 实现与测试假实现共用）。
@@ -76,16 +90,16 @@ func NewCache(loader Loader, log *slog.Logger) *Cache {
 		gwBySerial:   map[string]string{},
 		ptsByID:      map[int64]PointConfig{},
 		ptsByPhyID:   map[pointKey]int64{},
+		loadTimeout:  defaultLoadTimeout,
 		loader:       loader,
 		log:          log,
 	}
 }
 
-// Initial 首版全量加载并校准游标。PG 不可用时调用方应重试而非带空缓存服务。
+// Initial 首版全量加载并校准游标。PG 不可用（含挂起至超时）时调用方应重试
+// 而非带空缓存服务。
 func (c *Cache) Initial(ctx context.Context) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.fullResyncLocked(ctx)
+	return c.fullResync(ctx)
 }
 
 // GatewayByClientID topic clientid → 网关（未命中即 UNKNOWN_GATEWAY 判据）。
@@ -153,37 +167,50 @@ func (c *Cache) Size() int {
 }
 
 // Refresh 一轮刷新：incremental=true 走游标增量，否则全量重对齐。
-// 失败保留旧缓存（§6.2），只报错——调用方（刷新循环）记指标与 WARN。
+// 取数在锁外（DAT-121：持写锁跨 PG 查询会让 PG 挂起阻塞全部热路径读），
+// 仅套用阶段短暂持写锁；失败保留旧缓存（§6.2），只报错——调用方（刷新循环）
+// 记指标与 WARN。刷新循环单 goroutine 串行调用，锁外取数不存在并发套用乱序；
+// 与 Initial 也不会并发（首版加载完成后循环才启动）。
 func (c *Cache) Refresh(ctx context.Context, incremental bool) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
 	if !incremental {
-		return c.fullResyncLocked(ctx)
+		return c.fullResync(ctx)
 	}
 
-	changed, err := c.loader.LoadPointsSince(ctx, c.cursor)
+	c.mu.RLock()
+	cursor := c.cursor
+	c.mu.RUnlock()
+
+	changed, err := c.loadPoints(ctx, cursor)
 	if err != nil {
 		return fmt.Errorf("incremental load: %w", err)
 	}
+	maxUpd, maxErr := c.maxUpdatedAt(ctx)
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	c.applyPointsLocked(changed)
-	if maxUpd, err := c.loader.MaxUpdatedAt(ctx); err == nil && maxUpd.After(c.cursor) {
+	if maxErr == nil && maxUpd.After(c.cursor) {
 		c.cursor = maxUpd
 	}
 	c.lastRefreshAt = time.Now()
 	return nil
 }
 
-// fullResyncLocked 全量重对齐：整表替换 + 游标校准（调用方持有写锁）。
-func (c *Cache) fullResyncLocked(ctx context.Context) error {
-	gws, err := c.loader.LoadGateways(ctx)
+// fullResync 全量重对齐：锁外取数（网关 + 整表点位 + 游标上界），持锁整表
+// 替换 + 游标校准。
+func (c *Cache) fullResync(ctx context.Context) error {
+	gws, err := c.loadGateways(ctx)
 	if err != nil {
 		return fmt.Errorf("load gateways: %w", err)
 	}
-	pts, err := c.loader.LoadPointsSince(ctx, time.Time{})
+	pts, err := c.loadPoints(ctx, time.Time{})
 	if err != nil {
 		return fmt.Errorf("full load points: %w", err)
 	}
+	maxUpd, maxErr := c.maxUpdatedAt(ctx)
 
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	c.gwByClientID = gws
 	c.gwBySerial = make(map[string]string, len(gws))
 	for _, g := range gws {
@@ -195,13 +222,33 @@ func (c *Cache) fullResyncLocked(ctx context.Context) error {
 	for id, p := range pts {
 		c.applyPointLocked(id, p)
 	}
-	if maxUpd, err := c.loader.MaxUpdatedAt(ctx); err == nil {
+	if maxErr == nil {
 		c.cursor = maxUpd
 	} else {
 		c.cursor = time.Now()
 	}
 	c.lastRefreshAt = time.Now()
 	return nil
+}
+
+// loadGateways / loadPoints / maxUpdatedAt 统一带取数超时的 Loader 调用
+// （DSN 无 statement_timeout，挂起只能靠 ctx 兜底——DAT-121）。
+func (c *Cache) loadGateways(ctx context.Context) (map[string]GatewayConfig, error) {
+	ctx, cancel := context.WithTimeout(ctx, c.loadTimeout)
+	defer cancel()
+	return c.loader.LoadGateways(ctx)
+}
+
+func (c *Cache) loadPoints(ctx context.Context, since time.Time) (map[int64]PointConfig, error) {
+	ctx, cancel := context.WithTimeout(ctx, c.loadTimeout)
+	defer cancel()
+	return c.loader.LoadPointsSince(ctx, since)
+}
+
+func (c *Cache) maxUpdatedAt(ctx context.Context) (time.Time, error) {
+	ctx, cancel := context.WithTimeout(ctx, c.loadTimeout)
+	defer cancel()
+	return c.loader.MaxUpdatedAt(ctx)
 }
 
 // applyPointsLocked 增量套用变更行（含网关迁移/改名时的旧键驱逐）。

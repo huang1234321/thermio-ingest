@@ -37,6 +37,7 @@ type Config struct {
 	RetentionCutoff   time.Duration // §7.1 拒写线（2 年）
 	StaleScanInterval time.Duration // §6.3（30s）
 	ProduceTimeout    time.Duration // Kafka produce 等待上界（默认 10s）
+	TsdbWriteTimeout  time.Duration // TSDB 批写等待上界（默认 30s；挂起走 TSDB_WRITE_FAILED 死信兜底）
 
 	DecodeWorkers int // 0 = 4
 }
@@ -85,6 +86,12 @@ func New(cfg Config, cache *points.Cache, w tsdb.BatchWriter, k KafkaSink,
 	}
 	if cfg.ProduceTimeout <= 0 {
 		cfg.ProduceTimeout = 10 * time.Second
+	}
+	if cfg.TsdbWriteTimeout <= 0 {
+		// 30s 上界：覆盖内部 3 次重试（100/200/400ms 退避）+ 批量 upsert 余量，
+		// 只兜「无响应挂起」（真慢可等）；超时后整批死信 + PUBACK 释放背压，
+		// 约一个 BUFFER_MAX_ROWS（100k 行）的积压窗口（DAT-121）。
+		cfg.TsdbWriteTimeout = 30 * time.Second
 	}
 	if cfg.MaxQueueMessages <= 0 {
 		cfg.MaxQueueMessages = 10000

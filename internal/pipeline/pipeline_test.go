@@ -1,6 +1,7 @@
 package pipeline
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -29,9 +30,14 @@ type fakeWriter struct {
 	batches  [][]tsdb.Row
 	gate     chan struct{} // 非 nil 时每批写前阻塞（背压演练）
 	failNext int           // >0 时接下来 N 批失败
+	hang     bool          // true：写挂起直至 ctx 结束（模拟 TSDB 无响应，DAT-121）
 }
 
 func (f *fakeWriter) WriteBatch(ctx context.Context, rows []tsdb.Row) error {
+	if f.hang {
+		<-ctx.Done()
+		return ctx.Err()
+	}
 	if f.gate != nil {
 		<-f.gate
 	}
@@ -58,13 +64,18 @@ func (f *fakeWriter) rowsAll() []tsdb.Row {
 }
 
 type fakeKafka struct {
-	mu      sync.Mutex
-	records []*kgo.Record
+	mu                sync.Mutex
+	records           []*kgo.Record
+	failDirectQuality bool // true：单条质量事件直发报错（stale 路径，DAT-121）
 }
 
 func (f *fakeKafka) Produce(ctx context.Context, recs ...*kgo.Record) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	// 只模拟 stale 路径的单条直发失败：批 produce（raw/事件/死信）不受影响。
+	if f.failDirectQuality && len(recs) == 1 && recs[0].Topic == kafkaproducer.TopicTelemetryQuality {
+		return fmt.Errorf("injected quality produce failure")
+	}
 	f.records = append(f.records, recs...)
 	return nil
 }
@@ -567,5 +578,136 @@ func TestMetricsMQTTMessagesAndSeqGaps(t *testing.T) {
 	}
 	if got := len(fw.rowsAll()); got != 3 {
 		t.Errorf("合法行 = %d, want 3", got)
+	}
+}
+
+// ── DAT-121 健壮性跟进 ───────────────────────────────────────────────────
+
+// syncBuf 并发安全的日志缓冲（writer/scanner 多 goroutine 写）。
+type syncBuf struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (s *syncBuf) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.Write(p)
+}
+func (s *syncBuf) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.String()
+}
+
+// DAT-121-2：TSDB 批写挂起（无响应、非快速失败）受写超时上界约束——超时走
+// 既有 TSDB_WRITE_FAILED 死信路径，PUBACK 照发（防重投风暴），raw 不产
+// （真相源未落）。无超时的旧实现会让 writer 永久阻塞、本测试 10s 收尾超时。
+func TestPipelineTSDBWriteTimeout(t *testing.T) {
+	p, _, fw, fk, _ := newTestPipeline(t, Config{TsdbWriteTimeout: 100 * time.Millisecond})
+	fw.hang = true
+	var acked int
+	var mu sync.Mutex
+	m := msg("GW-A", 1, `{"name":"TEMP_F","value":77,"ts":"2026-09-26T14:03:04+08:00"}`)
+	m.Ack = func() { mu.Lock(); acked++; mu.Unlock() }
+	runAndWait(t, p, func(intake chan<- mqtt.Inbound) { intake <- m })
+
+	if got := testutil.ToFloat64(p.met.TSDBFailures); got != 1 {
+		t.Errorf("ingest_tsdb_write_failures_total = %v, want 1", got)
+	}
+	if got := len(fk.byTopic(kafkaproducer.TopicTelemetryRaw)); got != 0 {
+		t.Errorf("超时批不应发 raw 流: %d", got)
+	}
+	dlqs := fk.byTopic(kafkaproducer.TopicDLQ)
+	if len(dlqs) != 1 {
+		t.Fatalf("死信 = %d, want 1（TSDB_WRITE_FAILED 兜底）", len(dlqs))
+	}
+	var dm dlq.Message
+	if err := json.Unmarshal(dlqs[0].Value, &dm); err != nil || dm.Reason != dlq.TSDBWriteFailed {
+		t.Errorf("死信 reason 错误: %v %+v", err, dm)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if acked != 1 {
+		t.Errorf("超时批仍应 PUBACK: %d", acked)
+	}
+}
+
+// runStaleSequence 演练 stale 全周期：老样本（ts 距 testNow 6min > 300s 超时）
+// 等扫描置位发 stale_set；新鲜样本解除发 stale_cleared。返回收尾后的管线。
+func runStaleSequence(t *testing.T, p *Pipeline, fw *fakeWriter) *Pipeline {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { p.Run(ctx); close(done) }()
+	inject := p.Intake()
+
+	// 老样本 → 扫描置位（首轮 warmup，第二轮判定）。
+	inject <- mqtt.Inbound{Topic: "thermio/gw/GW-A/up/data", Payload: []byte(
+		`{"msg_type":"telemetry_batch","ver":1,"gw":"SER-A","seq":1,"sent_at":"2026-09-26T14:03:05+08:00","points":[{"name":"TEMP_F","value":1,"ts":"` + tsFrom(-6*time.Minute) + `"}]}`), Ack: func() {}}
+	deadline := time.Now().Add(5 * time.Second)
+	for !p.stale.IsStale(1) && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !p.stale.IsStale(1) {
+		t.Fatal("等待 stale 置位超时")
+	}
+
+	// 新鲜样本 → flush 落库后解除（stale_cleared）。
+	inject <- msg("GW-A", 2, `{"name":"TEMP_F","value":2,"ts":"`+tsFrom(0)+`"}`)
+	waitRows(t, fw, 2)
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("stale 演练未在 10s 内收尾")
+	}
+	return p
+}
+
+// DAT-121-3 正路径：stale_set / stale_cleared 事件确实直发 quality topic。
+func TestStaleEventsProduced(t *testing.T) {
+	p, _, fw, fk, _ := newTestPipeline(t, Config{})
+	runStaleSequence(t, p, fw)
+	evs := fk.byTopic(kafkaproducer.TopicTelemetryQuality)
+	got := map[string]int{}
+	for _, r := range evs {
+		var qp qualityPayload
+		if err := json.Unmarshal(r.Value, &qp); err != nil {
+			t.Fatalf("质量事件值非法 JSON: %v", err)
+		}
+		got[qp.Event]++
+	}
+	if got[quality.EventStaleSet] != 1 || got[quality.EventStaleCleared] != 1 {
+		t.Errorf("stale 事件 = %v, want stale_set=1 stale_cleared=1", got)
+	}
+	if c := testutil.ToFloat64(p.met.QualityProduceFailures); c != 0 {
+		t.Errorf("正常路径失败计数 = %v, want 0", c)
+	}
+}
+
+// DAT-121-3：stale 质量事件 produce 失败不吞——WARN 日志 + 失败指标
+// （CODE-ST-01）；数据面（raw/落库）不受影响。
+func TestStaleEventProduceFailureLoggedAndCounted(t *testing.T) {
+	p, _, fw, fk, _ := newTestPipeline(t, Config{})
+	buf := &syncBuf{}
+	p.log = slog.New(slog.NewTextHandler(buf, nil)) // WARN 断言用
+	fk.failDirectQuality = true
+	runStaleSequence(t, p, fw)
+
+	if c := testutil.ToFloat64(p.met.QualityProduceFailures); c != 2 {
+		t.Errorf("ingest_quality_produce_failures_total = %v, want 2（stale_set + stale_cleared）", c)
+	}
+	logs := buf.String()
+	if !strings.Contains(logs, "quality event produce failed") {
+		t.Errorf("WARN 日志缺失，got: %s", logs)
+	}
+	// 数据面不受牵连：两行照落、raw 照发。
+	if got := len(fw.rowsAll()); got != 2 {
+		t.Errorf("落库行 = %d, want 2", got)
+	}
+	if got := len(fk.byTopic(kafkaproducer.TopicTelemetryRaw)); got != 2 {
+		t.Errorf("raw 记录 = %d, want 2", got)
 	}
 }
