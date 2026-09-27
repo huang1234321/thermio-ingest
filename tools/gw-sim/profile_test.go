@@ -39,3 +39,41 @@ func TestCommittedProfilesValid(t *testing.T) {
 		t.Errorf("profiles = %d (README 矩阵预期 ≥ 20)", n)
 	}
 }
+
+// DAT-165：offset + overrides 旋钮校验。
+func TestValidateOffsetAndOverrides(t *testing.T) {
+	base := func() Profile {
+		return Profile{
+			Name: "t", SampleIntervalS: 5, Points: PointsCfg{
+				Count: 2, NumericRatio: 1.0, Units: []string{"degC"},
+			},
+		}
+	}
+	t.Run("offset-negative-rejected", func(t *testing.T) {
+		p := base()
+		p.Points.Offset = -1
+		if err := p.Validate(); err == nil {
+			t.Fatal("want error for negative offset")
+		}
+	})
+	t.Run("override-bad-kind-rejected", func(t *testing.T) {
+		p := base()
+		p.Points.Overrides = map[string]PointOverride{
+			"SIM_0000": {Kind: "weird"},
+		}
+		if err := p.Validate(); err == nil {
+			t.Fatal("want error for bad override kind")
+		}
+	})
+	t.Run("valid-override-accepted", func(t *testing.T) {
+		p := base()
+		v := 7.0
+		p.Points.Offset = 100
+		p.Points.Overrides = map[string]PointOverride{
+			"SIM_0100": {Base: &v, Unit: "degC"},
+		}
+		if err := p.Validate(); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	})
+}
