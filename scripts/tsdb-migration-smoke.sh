@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # tsdb-migration-smoke.sh —— 一次性干净 TSDB 上的迁移链冒烟（CI 与本地同一路径）。
 #
-#   bootstrap 角色 → goose up → ddl.md §8 用例 8–11 复跑 → goose down-to 0 → goose up
+#   bootstrap 角色 → goose up → ddl.md §8 用例 8–12 复跑 → goose down-to 0 → goose up
 #
 # 角色口令运行时随机生成，不落源码（SEC-KEY-01）。环境隔离纪律（2026-09-26 小黄
 # 指示）：只连自起的一次性容器或本项目 deploy 独立栈，禁止复用宿主机/其他项目
@@ -41,13 +41,27 @@ PGPASSWORD="$TSDB_SUPER_PASSWORD" psql -h "$TSDB_HOST" -p "$TSDB_PORT" -U postgr
   -v algo_password="$TSDB_ALGO_PASSWORD" \
   -f db/bootstrap/tsdb-roles.sql
 
+# 双 cagg real-time 契约（ddl.md §11.2 v1.5 / DAT-158）：materialized_only 必须 false。
+# TS ≥2.7 引擎默认是 true（近窗不可见），0002 显式关 + 0005 存量收口后在此永久把关。
+cagg_realtime_check() {
+  local out
+  out=$(PGPASSWORD="$TSDB_SUPER_PASSWORD" psql -h "$TSDB_HOST" -p "$TSDB_PORT" -U postgres -d "$DB" -tAc \
+    "SELECT string_agg(view_name || '=' || materialized_only::text, ', ' ORDER BY view_name)
+     FROM timescaledb_information.continuous_aggregates
+     WHERE view_name IN ('telemetry_5min','telemetry_1h')")
+  [[ "$out" == "telemetry_1h=false, telemetry_5min=false" ]] \
+    || { echo "FAIL: cagg real-time 契约破坏（want 双 false，got ${out:-空}）"; exit 1; }
+  echo "PASS: 双 cagg materialized_only=false（real-time 开）"
+}
+
 echo "== 2/5 goose up（管理员执行，ddl.md §5.4）=="
 "$GOOSE_BIN" -dir "$MIG_DIR" postgres "$admin_dsn" up
 n=$(obj_count)
 [[ "$n" == 5 ]] || { echo "FAIL: up 后用户对象 $n ≠ 5（3 表 + 2 cagg）"; exit 1; }
 echo "PASS: up 后 5 用户对象（3 hypertable + 2 cagg）"
+cagg_realtime_check
 
-echo "== 3/5 ddl.md §8 用例 8–11 复跑（scripts/verify-tsdb.sh）=="
+echo "== 3/5 ddl.md §8 用例 8–12 复跑（scripts/verify-tsdb.sh）=="
 scripts/verify-tsdb.sh
 
 echo "== 4/5 goose down-to 0（回滚干净）=="
@@ -70,6 +84,7 @@ echo "== 5/5 goose up（重建，round-trip 闭环）=="
 n=$(obj_count)
 [[ "$n" == 5 ]] || { echo "FAIL: 重建后用户对象 $n ≠ 5"; exit 1; }
 echo "PASS: 重建后 5 用户对象"
+cagg_realtime_check
 
 echo
-echo "SMOKE OK：bootstrap → up → 用例 8–11 → down-to 0 → up 全部通过"
+echo "SMOKE OK：bootstrap → up → 用例 8–12 → down-to 0 → up 全部通过"

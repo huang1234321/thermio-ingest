@@ -3,9 +3,10 @@
 -- 均自原始 telemetry 直接物化（不做 cagg 嵌套 rollup）：刷新语义单一，
 -- 嵌套优化（1h 由 5min rollup）量级到区域中心再评估。
 -- 列名对齐 DATA-MODEL §4；sample_count/bad_count 为本文增量（§7.1 #15）。
--- 默认 real-time 聚合开：近窗（刷新策略 end_offset 之内）由原始表现场合并。
+-- real-time 聚合显式开启：近窗（刷新策略 end_offset 之内）由原始表现场合并。
+-- （v1.5 勘误：TS ≥2.7 默认 materialized_only=true，不能依赖引擎默认，DAT-158）
 CREATE MATERIALIZED VIEW telemetry_5min
-WITH (timescaledb.continuous) AS
+WITH (timescaledb.continuous, timescaledb.materialized_only = false) AS
 SELECT point_id,
        time_bucket(INTERVAL '5 minutes', ts) AS bucket,
        avg(value)          AS avg,
@@ -21,7 +22,7 @@ GROUP BY point_id, bucket
 WITH NO DATA;
 
 CREATE MATERIALIZED VIEW telemetry_1h
-WITH (timescaledb.continuous) AS
+WITH (timescaledb.continuous, timescaledb.materialized_only = false) AS
 SELECT point_id,
        time_bucket(INTERVAL '1 hour', ts) AS bucket,
        avg(value)          AS avg,
