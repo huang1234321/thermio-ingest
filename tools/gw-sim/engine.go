@@ -290,9 +290,10 @@ func (g *gatewaySim) applyOverride(name string, def *pointDef, isEnum bool) {
 	if !ok {
 		return
 	}
-	if o.Kind == "numeric" {
+	switch o.Kind {
+	case "numeric":
 		def.kind = "numeric"
-	} else if o.Kind == "enum" {
+	case "enum":
 		def.kind = "enum"
 	}
 	if def.kind == "enum" {
