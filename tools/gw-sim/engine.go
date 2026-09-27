@@ -245,34 +245,74 @@ func indexOf(s, sub string) int {
 }
 
 // buildPoints 生成点位集：数值量（单位轮转）+ 枚态量 + 设定值点位。
+// Offset 起始序号与 Overrides 点名级覆盖在此时套用（profile.go DAT-165 增量）。
 func (g *gatewaySim) buildPoints() {
 	p := g.profile.Points
 	numeric := int(math.Round(float64(p.Count) * p.NumericRatio))
 	for i := 0; i < p.Count; i++ {
-		name := fmt.Sprintf("%s%04d", telemetryPrefix(g.idx), i)
+		idx := p.Offset + i
+		name := fmt.Sprintf("%s%04d", telemetryPrefix(g.idx), idx)
 		if i < numeric {
-			g.numPoints = append(g.numPoints, pointDef{
+			def := pointDef{
 				name: name, kind: "numeric",
 				unit:      p.Units[i%len(p.Units)],
-				base:      p.Base + float64(i%7),
+				base:      p.Base + float64(idx%7),
 				amplitude: p.Amplitude,
 				noise:     p.Noise,
-				phase:     float64(i) * 0.37,
-			})
+				phase:     float64(idx) * 0.37,
+			}
+			g.applyOverride(name, &def, false)
+			g.numPoints = append(g.numPoints, def)
 			continue
 		}
-		vals := append([]string(nil), p.EnumValues...)
-		g.numPoints = append(g.numPoints, pointDef{ // 枚态也进遥测集
-			name: name, kind: "enum", enumValues: vals,
-		})
+		def := pointDef{ // 枚态也进遥测集
+			name: name, kind: "enum", enumValues: append([]string(nil), p.EnumValues...),
+		}
+		g.applyOverride(name, &def, true)
+		g.numPoints = append(g.numPoints, def)
 	}
 	for i := 0; i < p.Setpoints; i++ {
 		name := fmt.Sprintf("SIM_SP_%04d", i)
-		g.spPoints = append(g.spPoints, pointDef{
+		def := pointDef{
 			name: name, kind: "numeric", unit: "degC",
 			base: p.SetpointBase, noise: p.Noise, phase: float64(i) * 0.11,
-		})
+		}
+		g.applyOverride(name, &def, false)
+		g.spPoints = append(g.spPoints, def)
 		g.down.InitSetpoint(name, p.SetpointBase)
+	}
+}
+
+// applyOverride 将 points.overrides[name] 套到点位定义上（未指出的字段沿用全局值；
+// kind 切换允许把轮转出的数值位改枚态或反向——冷源场景的机组状态差异需要）。
+func (g *gatewaySim) applyOverride(name string, def *pointDef, isEnum bool) {
+	o, ok := g.profile.Points.Overrides[name]
+	if !ok {
+		return
+	}
+	switch o.Kind {
+	case "numeric":
+		def.kind = "numeric"
+	case "enum":
+		def.kind = "enum"
+	}
+	if def.kind == "enum" {
+		if len(o.EnumValues) > 0 {
+			def.enumValues = append([]string(nil), o.EnumValues...)
+		}
+		return
+	}
+	if o.Unit != "" {
+		def.unit = o.Unit
+	}
+	if o.Base != nil {
+		def.base = *o.Base
+	}
+	if o.Amplitude != nil {
+		def.amplitude = *o.Amplitude
+	}
+	if o.Noise != nil {
+		def.noise = *o.Noise
 	}
 }
 

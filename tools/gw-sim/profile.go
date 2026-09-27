@@ -70,6 +70,24 @@ type PointsCfg struct {
 	// WriteMin/WriteMax 设定值合法写入域（越界写应答 rejected）。
 	WriteMin float64 `json:"write_min"`
 	WriteMax float64 `json:"write_max"`
+	// Offset 点名起始序号（默认 0）：SIM_<offset+i>。冷源优化器等回放需要使用
+	// e2e-seed 已注册的高段点位（如 SIM_0100..），避免与其它夹具点位段互相污染
+	// （IMPL-19 / DAT-165 场景隔离）。
+	Offset int `json:"offset,omitempty"`
+	// Overrides 点名级参数覆盖（按生成名匹配，含 setpoints 的 SIM_SP_ 名）：
+	// 只覆盖指出的字段——单点差异化（某台机组停机、某测点定值）是冷源站房
+	// 场景回放的基本需要，全局 base/amplitude 无法表达（DAT-165 增量）。
+	Overrides map[string]PointOverride `json:"overrides,omitempty"`
+}
+
+// PointOverride 单点参数覆盖（指针字段 = 未指出即沿用全局值）。
+type PointOverride struct {
+	Kind       string   `json:"kind,omitempty"`        // "numeric"|"enum"（默认沿用全局拆分）
+	Unit       string   `json:"unit,omitempty"`        // 数值单位（空 = 沿用轮转/全局值）
+	Base       *float64 `json:"base,omitempty"`        // 数值基线
+	Amplitude  *float64 `json:"amplitude,omitempty"`   // 正弦幅度
+	Noise      *float64 `json:"noise,omitempty"`       // 噪声幅度
+	EnumValues []string `json:"enum_values,omitempty"` // 枚态取值域（枚态覆盖用）
 }
 
 // FaultsCfg 全部故障注入旋钮（默认零值 = 全关）。rate 类按点位独立投掷；
@@ -194,6 +212,24 @@ func (p *Profile) Validate() error {
 	}
 	if p.Points.WriteMin == 0 && p.Points.WriteMax == 0 {
 		p.Points.WriteMin, p.Points.WriteMax = -1e9, 1e9
+	}
+	if p.Points.Offset < 0 {
+		return fmt.Errorf("points.offset must be >= 0")
+	}
+	for name, o := range p.Points.Overrides {
+		if o.Kind != "" && o.Kind != "numeric" && o.Kind != "enum" {
+			return fmt.Errorf("points.overrides[%s].kind must be numeric|enum", name)
+		}
+		for _, r := range []struct {
+			name string
+			v    *float64
+		}{
+			{"base", o.Base}, {"amplitude", o.Amplitude}, {"noise", o.Noise},
+		} {
+			if r.v != nil && (*r.v < -1e12 || *r.v > 1e12) {
+				return fmt.Errorf("points.overrides[%s].%s out of range", name, r.name)
+			}
+		}
 	}
 	if p.Seed == 0 {
 		p.Seed = 1

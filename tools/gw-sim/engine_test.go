@@ -1,6 +1,8 @@
 package main
 
 import (
+	"io"
+	"log/slog"
 	"testing"
 	"time"
 )
@@ -152,5 +154,44 @@ func TestPublishBatchSequenceNormalPath(t *testing.T) {
 	}
 	if n := g.ob.len(); n != 3 {
 		t.Fatalf("outbox = %d want 3 (offline buffered)", n)
+	}
+}
+
+// DAT-165：offset 命名与 overrides 单点差异化（含 kind 切换）。
+func TestBuildPointsOffsetAndOverrides(t *testing.T) {
+	v150 := 150.0
+	zero := 0.0
+	p := &Profile{
+		Name: "cold-plant", SampleIntervalS: 5,
+		Points: PointsCfg{
+			Count: 4, NumericRatio: 0.75, Units: []string{"degC"},
+			Base: 20, Offset: 100,
+			Overrides: map[string]PointOverride{
+				"SIM_0100": {Base: &v150, Unit: "kW"},                       // 数值覆盖
+				"SIM_0103": {Kind: "enum", EnumValues: []string{"stopped"}}, // 轮转数值位改枚态
+				"SIM_0101": {Base: &zero, Amplitude: &zero},                 // 常值 0
+			},
+		},
+	}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	g := newGatewaySim(p, 0, "tcp://x", "pw", newRunStats(), logger)
+	if len(g.numPoints) != 4 {
+		t.Fatalf("want 4 points, got %d", len(g.numPoints))
+	}
+	byName := map[string]pointDef{}
+	for _, d := range g.numPoints {
+		byName[d.name] = d
+	}
+	if d := byName["SIM_0100"]; d.base != 150.0 || d.unit != "kW" {
+		t.Fatalf("override not applied: %+v", d)
+	}
+	if d := byName["SIM_0101"]; d.base != 0 || d.amplitude != 0 {
+		t.Fatalf("zero override not applied: %+v", d)
+	}
+	if d := byName["SIM_0103"]; d.kind != "enum" || len(d.enumValues) != 1 || d.enumValues[0] != "stopped" {
+		t.Fatalf("enum override not applied: %+v", d)
+	}
+	if _, ok := byName["SIM_0000"]; ok {
+		t.Fatal("offset ignored: SIM_0000 should not exist")
 	}
 }
