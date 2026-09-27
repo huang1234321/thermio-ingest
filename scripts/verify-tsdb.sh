@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
-# verify-tsdb.sh —— ddl.md §8 用例 8–11 脚本化复跑（DAT-98 / IMPL-4 验收口径）。
+# verify-tsdb.sh —— ddl.md §8 用例 8–11 + §11.2 real-time 用例 12 脚本化复跑（DAT-98 / IMPL-4 验收口径）。
 #
 #   用例 8  telemetry 幂等 upsert（ON CONFLICT DO UPDATE，last-write-wins）
 #   用例 9  cagg 聚合正确性（avg 忽略 NULL、bad_count、bit_or quality_mask）
 #   用例 10 TSDB 角色矩阵（ddl.md §5.4：ingest 窄写 / api 只读 / algo 读+天气写）
 #   用例 11 压缩策略 + 压缩后补传（自动解压；cagg 手动刷新收敛，runbook 路径）
+#   用例 12 cagg real-time 近窗可见性（ddl.md §11.2：materialized_only=false，
+#           近窗数据免手动 refresh 自然可见——FDD 5min 节奏的消费契约，DAT-158）
 #
 # 前置：迁移链已 goose up（角色经 bootstrap 建立）。角色一律经 TCP 口令认证真实
 # 登录（非 SET ROLE 模拟，ddl.md §8.1 口径）。脚本幂等可重跑：探针数据先清后插。
@@ -43,7 +45,7 @@ probe() {
 near() { awk -v a="$1" -v b="$2" 'BEGIN{exit !(a-b<1e-9 && b-a<1e-9)}'; }
 
 # 探针数据清场（重跑幂等）：保留策略是唯一删除通道，清理走管理员
-admin -c "DELETE FROM telemetry WHERE point_id IN (101, 102, 103)" >/dev/null
+admin -c "DELETE FROM telemetry WHERE point_id IN (101, 102, 103, 104)" >/dev/null
 
 UPSERT="INSERT INTO telemetry (point_id, ts, value, quality)
         VALUES (101, date_trunc('hour', now() - interval '2 hours'), %s, 0)
@@ -143,6 +145,23 @@ row=$(api -tAc "SELECT avg, sample_count FROM telemetry_5min
 IFS='|' read -r avg103 sc103 <<< "$row"
 [[ ${sc103:-x} == 4 ]] && ok "cagg 收敛：4 行落 1 桶" || bad "补传后 sample_count=${sc103:-空} ≠ 4"
 near "${avg103:-9e9}" 7.25 && ok "桶均值 7.25（(7.4+7.5+7.6+6.5)/4）" || bad "补传后 avg=${avg103:-空} ≠ 7.25"
+
+# ── 用例 12：real-time 近窗可见性（ddl.md §11.2，DAT-158）──────────────
+echo "== 用例 12 cagg real-time 近窗可见性（无手动 refresh）=="
+# 桶起点取整到 5min 边界（bash 一次定值，写读共用，免跨桶竞态）；写入即「现在」，
+# 落在刷新策略 end_offset（1h）之内——策略永不物化该窗，唯一可见通道 = real-time
+# 现场合并（materialized_only=false）。消费方视角断言：algo 读 cagg 即得，
+# 全程零 CALL refresh（对齐 DAT-154 it-fdd 链路去除手动代偿后的形态）。
+ep=$(date +%s); bucket_ep=$(( ep - ep % 300 ))
+ingest -c "INSERT INTO telemetry (point_id, ts, value, quality)
+           VALUES (104, to_timestamp(${bucket_ep}) + interval '1 min', 7.7, 0)
+           ON CONFLICT (point_id, ts) DO NOTHING" >/dev/null
+row=$(algo -tAc "SELECT sample_count::text || '|' || \"avg\"::text
+                 FROM telemetry_5min
+                 WHERE point_id = 104 AND bucket = to_timestamp(${bucket_ep})")
+IFS='|' read -r sc104 avg104 <<< "$row"
+[[ ${sc104:-x} == 1 ]]     && ok "近窗桶免 refresh 即可见（sample_count=1）" || bad "近窗不可见或计数异常：sample_count=${sc104:-空}（real-time 未生效）"
+near "${avg104:-9e9}" 7.7  && ok "近窗桶 avg=7.7（实时合并值正确）"          || bad "近窗 avg=${avg104:-空} ≠ 7.7"
 
 echo
 echo "verify-tsdb: PASS=$PASS FAIL=$FAIL"

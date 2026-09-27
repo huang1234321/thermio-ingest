@@ -36,26 +36,27 @@ psql -U postgres -d thermio_ts \
 goose -dir db/migrations/tsdb postgres "$ADMIN_DSN" up
 ```
 
-迁移文件（蓝本 = 伞仓 ddl.md v1.2 §11，DAT-94 [IMPL-0]，逐字落盘）：
+迁移文件（蓝本 = 伞仓 ddl.md §11；0001–0004 = v1.2 DAT-94 [IMPL-0] 逐字落盘；0005 = v1.5 DAT-158 勘误增量）：
 
 | 文件 | 内容 |
 |---|---|
 | `0001_telemetry.sql` | telemetry hypertable（7 天 chunk）+ tsdb_ingest upsert 最小权限（INSERT+SELECT+UPDATE） |
-| `0002_telemetry_caggs.sql` | 双 continuous aggregate（5min/1h，直接物化，sample_count/bad_count 增列） |
+| `0002_telemetry_caggs.sql` | 双 continuous aggregate（5min/1h，直接物化，sample_count/bad_count 增列；real-time 显式开启 `materialized_only=false`，DAT-158） |
 | `0003_telemetry_policies.sql` | 压缩（7 天）/ 保留（2 年）/ cagg 刷新（start_offset 5 天）+ cagg 自身压缩保留 |
 | `0004_weather.sql` | 天气域两表（actual 10 年 / forecast 90 天）+ algo 读写授权 |
+| `0005_telemetry_caggs_realtime.sql` | 存量库 real-time 收口：已建双 cagg ALTER 置 `materialized_only=false`（新建路径由 0002 直出，本迁移幂等无副作用） |
 
 ## 验证
 
 ```bash
-# 干净一次性容器上的完整冒烟（bootstrap → up → §8 用例 8–11 → down-to 0 → up）
+# 干净一次性容器上的完整冒烟（bootstrap → up → §8 用例 8–12 → down-to 0 → up）
 scripts/tsdb-migration-smoke.sh   # 需 TSDB_HOST/TSDB_PORT/TSDB_SUPER_PASSWORD
 
-# 只复跑 ddl.md §8 用例 8–11（幂等 upsert / cagg 聚合 / 压缩后补传 / 角色矩阵）
+# 只复跑 ddl.md §8 用例 8–12（幂等 upsert / cagg 聚合 / 压缩后补传 / 角色矩阵）
 scripts/verify-tsdb.sh            # 另需三角色口令环境变量
 ```
 
 CI 在一次性 `timescale/timescaledb:2.17.2-pg16` 容器上跑同一脚本
-（`tsdb-migration-smoke` job）。goose 用 v3.24.0（与蓝本复验同版）；四个迁移均无
+（`tsdb-migration-smoke` job）。goose 用 v3.24.0（与蓝本复验同版）；五个迁移均无
 CONCURRENTLY 场景，全部默认事务（ddl.md §11 纪律），此后 TSDB 侧新增索引与 PG 同
 走 CONCURRENTLY 单文件模板（ddl.md §6.2）。
