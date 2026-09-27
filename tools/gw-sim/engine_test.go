@@ -167,9 +167,9 @@ func TestBuildPointsOffsetAndOverrides(t *testing.T) {
 			Count: 4, NumericRatio: 0.75, Units: []string{"degC"},
 			Base: 20, Offset: 100,
 			Overrides: map[string]PointOverride{
-				"SIM_0100": {Base: &v150, Unit: "kW"},                  // 数值覆盖
+				"SIM_0100": {Base: &v150, Unit: "kW"},                       // 数值覆盖
 				"SIM_0103": {Kind: "enum", EnumValues: []string{"stopped"}}, // 轮转数值位改枚态
-				"SIM_0101": {Base: &zero, Amplitude: &zero},            // 常值 0
+				"SIM_0101": {Base: &zero, Amplitude: &zero},                 // 常值 0
 			},
 		},
 	}
