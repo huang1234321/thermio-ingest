@@ -389,7 +389,7 @@ func (g *gatewaySim) onDownMessage(topic string, payload []byte) {
 		g.stats.addReadCmd()
 	}
 	now := time.Now()
-	ack := g.down.HandleMessage(payload, g.serial, now)
+	ack := g.down.HandleMessage(payload, g.clientID, now) // gw 字段=clientid（§4.3 与 topic 一致）
 	if ack == nil {
 		return
 	}
