@@ -95,6 +95,13 @@ func (t *StaleTracker) Scan(now time.Time) []StaleEvent {
 	return events
 }
 
+// Tracked 当前追踪的点数（D-38 心跳会计面）。
+func (t *StaleTracker) Tracked() int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return len(t.lastTS)
+}
+
 // IsStale 测试与指标辅助。
 func (t *StaleTracker) IsStale(pointID int64) bool {
 	t.mu.Lock()

@@ -74,42 +74,50 @@ func (p *Pipeline) runWriter() {
 		select {
 		case res, ok := <-p.decoded:
 			if !ok {
+				p.flushing.Store(true)
 				p.flush(b) // final flush：优雅退出冲缓冲（§12）
+				p.flushing.Store(false)
 				return
 			}
 			b.add(res, p.slotsOf(res))
 			if len(b.rows) >= p.cfg.BatchMaxRows {
+				p.flushing.Store(true)
 				p.flush(b)
+				p.flushing.Store(false)
 				lastFlush = time.Now()
 			}
 		case <-ticker.C:
 			if !b.empty() {
+				p.flushing.Store(true)
 				p.flush(b)
+				p.flushing.Store(false)
 				lastFlush = time.Now()
 			}
 		case <-heartbeat.C:
-			pipelineState := func() (int, int, int, int) {
-				return len(p.intake), len(p.decoded),
-					p.cfg.BufferMaxRows - len(p.rowGate), len(b.rows)
-			}
+			// D-38 会计面：持有量（rowGate tokens）必须能被四水位归因——
+			// decoded 通道里的消息 = 已扣占位未入批（round3 实证 27 msg × ~393 行
+			// ≈ 10,620 与 buffer 表象吻合而四水位对不上，盲区即此乘数）。
+			inUse := len(p.rowGate)
+			p.log.Info("writer_heartbeat",
+				"rowgate_in_use", inUse,
+				"rowgate_capacity", p.cfg.BufferMaxRows,
+				"intake_msgs", len(p.intake),
+				"decoded_msgs", len(p.decoded),
+				"decoded_slot_est", p.decodedSlotEst(),
+				"batch_rows", len(b.rows),
+				"writer_flushing", p.flushing.Load(),
+				"stale_tracked_points", p.stale.Tracked(),
+				"since_last_flush_s", int(time.Since(lastFlush).Seconds()),
+				"ledger", "in_use ≈ decoded_slot_est + batch_rows + 解码在制（worker 手持）",
+			)
 			if !b.empty() && !lastFlush.IsZero() && time.Since(lastFlush) > 3*p.cfg.BatchFlushInterval {
-				intakeN, decodedN, gateFree, batchRows := pipelineState()
 				p.log.Warn("writer_stalled",
-					"batch_rows", batchRows,
+					"batch_rows", len(b.rows),
 					"since_last_flush_s", int(time.Since(lastFlush).Seconds()),
-					"intake_queued", intakeN,
-					"decoded_queued", decodedN,
-					"rowgate_free", gateFree,
-					"rowgate_capacity", p.cfg.BufferMaxRows,
+					"rowgate_in_use", inUse,
+					"decoded_msgs", len(p.decoded),
+					"writer_flushing", p.flushing.Load(),
 					"hint", "批非空且超 3 个 flush 周期未落库——查 TSDB/Kafka 写延迟或宿主资源")
-			} else {
-				intakeN, decodedN, gateFree, batchRows := pipelineState()
-				p.log.Info("writer_heartbeat",
-					"batch_rows", batchRows,
-					"since_last_flush_s", int(time.Since(lastFlush).Seconds()),
-					"intake_queued", intakeN,
-					"decoded_queued", decodedN,
-					"rowgate_free", gateFree)
 			}
 		}
 	}
@@ -177,12 +185,16 @@ func (p *Pipeline) flush(b *batch) {
 	}
 	p.met.KafkaProduceLatency.Observe(float64(p.nowFunc().Sub(start).Milliseconds()))
 
-	// stale 观测（§6.3）：TSDB 落库成功才推进 lastTS；解除事件即时补发。
+	// stale 观测（§6.3）：TSDB 落库成功才推进 lastTS；解除事件批内聚合单次 produce
+	// （DAT-202 D-38：原逐条同步 produce 构成 N×ProduceTimeout 串行阻塞面——排空
+	// 尾段阵发释放的候选机制；聚合后行为等价：同 topic 同记录、批内序保持）。
+	var clearedEvents []*kgo.Record
 	for i := range b.works {
 		if cleared := p.staleObserve(b.works[i].stale); cleared != nil {
-			p.produceQualityEvent(cleared)
+			clearedEvents = append(clearedEvents, cleared)
 		}
 	}
+	p.produceQualityEvents(clearedEvents)
 
 	// pipeline latency（§10：MQTT 收到 → TSDB 落库）以批内最老消息锚定。
 	oldest := b.msgs[0].receivedAt

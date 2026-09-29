@@ -2,6 +2,7 @@
 package pipeline
 
 import (
+	"github.com/twmb/franz-go/pkg/kgo"
 	"context"
 	"time"
 
@@ -20,16 +21,19 @@ func (p *Pipeline) runStaleScanner(ctx context.Context) {
 			return
 		case <-ticker.C:
 			now := p.nowFunc().UTC()
+			// 整轮聚合单发（DAT-202 D-38：突发静默后一轮可产生千级 stale_set——
+			// 逐条同步 produce 即 N×ProduceTimeout 串行阻塞面）
+			var recs []*kgo.Record
 			for _, ev := range p.stale.Scan(now) {
 				pc, ok := p.cache.PointByID(ev.PointID)
 				if !ok {
 					continue
 				}
-				rec := qualityRecord(pc.GatewayID, pc.TenantID, pc.PointID, now,
+				recs = append(recs, qualityRecord(pc.GatewayID, pc.TenantID, pc.PointID, now,
 					quality.EventStaleSet,
-					map[string]any{"stale_timeout_s": pc.StaleTimeoutS}, newTraceID())
-				p.produceQualityEvent(rec)
+					map[string]any{"stale_timeout_s": pc.StaleTimeoutS}, newTraceID()))
 			}
+			p.produceQualityEvents(recs)
 		}
 	}
 }

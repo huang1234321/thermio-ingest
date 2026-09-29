@@ -14,6 +14,7 @@ import (
 	"context"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/huang1234321/thermio-ingest/internal/metrics"
@@ -68,6 +69,8 @@ type Pipeline struct {
 	rowGate chan struct{} // 容量 BufferMaxRows：一行一占位，flush 落定后释放
 
 	source *mqtt.Source // 可为 nil（测试直接喂 intake）
+
+	flushing atomic.Bool // writer 是否在 flush 内（D-38 心跳会计面）
 
 	mu       sync.Mutex
 	lastSeq  map[string]int64 // seq 缺口检测（§3.2：只记指标与 WARN）
@@ -185,6 +188,22 @@ func (p *Pipeline) acquireRows(n int) {
 	for i := 0; i < n; i++ {
 		p.rowGate <- struct{}{}
 	}
+}
+
+// decodedSlotEst decoded 通道内消息的占位行数估计（消息数 × 批行上界 500 的
+// 收敛估计——D-38 会计面：持有量归因的主盲区即此通道的行乘数）。
+func (p *Pipeline) decodedSlotEst() int {
+	n := len(p.decoded)
+	if n == 0 {
+		return 0
+	}
+	// 不精确但可对账：按已入通道消息数 × 平均批行规模（配置的批上界与 500 契约
+	// 上限取小）作量级估计；精确拆解需消息级记账，不值得为此加锁。
+	per := p.cfg.BatchMaxRows
+	if per > 500 {
+		per = 500
+	}
+	return n * per
 }
 
 // releaseRows 释放行占位（flush 落定后）。
