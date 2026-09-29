@@ -56,11 +56,19 @@ func (b *batch) reset() {
 }
 
 // runWriter §5.1 阶段 6/7。decoded 关闭且排空后做 final flush 再退出（§12 冲缓冲）。
+//
+// 心跳与停摆观测（DAT-202 D-29）：60s 心跳日志携带全链水位（intake/decoded/
+// rowGate/批内行/flush 年龄）——G4 预演实测「排空尾段停摆 + 零错误日志」形态下
+// 无任何现场信号可判位（计数冻结原因不可判）。批非空且 >3 个 flush 周期未落
+// 时升 WARN writer_stalled（含同一组水位），把复发变成可诊断事件。
 func (p *Pipeline) runWriter() {
 	defer p.writerWG.Done()
 	ticker := time.NewTicker(p.cfg.BatchFlushInterval)
 	defer ticker.Stop()
+	heartbeat := time.NewTicker(time.Minute)
+	defer heartbeat.Stop()
 
+	var lastFlush time.Time
 	b := &batch{}
 	for {
 		select {
@@ -72,10 +80,36 @@ func (p *Pipeline) runWriter() {
 			b.add(res, p.slotsOf(res))
 			if len(b.rows) >= p.cfg.BatchMaxRows {
 				p.flush(b)
+				lastFlush = time.Now()
 			}
 		case <-ticker.C:
 			if !b.empty() {
 				p.flush(b)
+				lastFlush = time.Now()
+			}
+		case <-heartbeat.C:
+			pipelineState := func() (int, int, int, int) {
+				return len(p.intake), len(p.decoded),
+					p.cfg.BufferMaxRows - len(p.rowGate), len(b.rows)
+			}
+			if !b.empty() && !lastFlush.IsZero() && time.Since(lastFlush) > 3*p.cfg.BatchFlushInterval {
+				intakeN, decodedN, gateFree, batchRows := pipelineState()
+				p.log.Warn("writer_stalled",
+					"batch_rows", batchRows,
+					"since_last_flush_s", int(time.Since(lastFlush).Seconds()),
+					"intake_queued", intakeN,
+					"decoded_queued", decodedN,
+					"rowgate_free", gateFree,
+					"rowgate_capacity", p.cfg.BufferMaxRows,
+					"hint", "批非空且超 3 个 flush 周期未落库——查 TSDB/Kafka 写延迟或宿主资源")
+			} else {
+				intakeN, decodedN, gateFree, batchRows := pipelineState()
+				p.log.Info("writer_heartbeat",
+					"batch_rows", batchRows,
+					"since_last_flush_s", int(time.Since(lastFlush).Seconds()),
+					"intake_queued", intakeN,
+					"decoded_queued", decodedN,
+					"rowgate_free", gateFree)
 			}
 		}
 	}
