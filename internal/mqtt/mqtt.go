@@ -63,7 +63,10 @@ type Source struct {
 
 	stopCh  chan struct{} // 关闭后 handler 不再入队（消息留给 EMQX 会话重投）
 	stopped sync.Once
-	handWG  sync.WaitGroup
+	handMu  sync.Mutex // 串行化 handWG 的 Add/Wait（WaitGroup 契约：零计数后的
+	//            Add 必须先于 Wait——否则 Wait 提前返回，pipeline 随后 close(intake)
+	//            会与迟到 handler 的入队 select 竞争，选中已闭通道发送即 panic）
+	handWG sync.WaitGroup
 }
 
 // NewSource queue 为有界 intake 队列（§5.1 10k 消息）。
@@ -94,7 +97,9 @@ func (s *Source) Start(_ context.Context, brokerURL, clientID, username, passwor
 // onMessage paho handler：同步入队（满则阻塞 → TCP 背压）；停机窗口直接
 // 返回（不 ACK，消息留在 EMQX 会话，重启后重投）。
 func (s *Source) onMessage(_ paho.Client, msg paho.Message) {
+	s.handMu.Lock()
 	s.handWG.Add(1)
+	s.handMu.Unlock()
 	defer s.handWG.Done()
 	select {
 	case <-s.stopCh:
@@ -119,19 +124,18 @@ func (s *Source) onMessage(_ paho.Client, msg paho.Message) {
 	}
 }
 
-// Shutdown 停订阅 → 等在途 handler 退出。未 ACK 的 QoS1 消息由 EMQX 会话保持
-// （§2），下次启动重投——at-least-once。
+// Shutdown 停止接收 → 等在途 handler 退出。**不发 UNSUBSCRIBE**（DAT-153 定因：
+// 持久会话上先退订 = $share 组内再无持有订阅的会话，停机窗口内发布的消息全走
+// no_subscribers 丢弃）——会话继续持有订阅，窗口消息由 EMQX 入离线会话 mqueue，
+// 重连续投；未 ACK 的 QoS1 消息由会话保持，下次启动重投——at-least-once（§2）。
 func (s *Source) Shutdown() {
 	s.stopped.Do(func() { close(s.stopCh) })
-	if s.client != nil && s.client.IsConnected() {
-		if tok := s.client.Unsubscribe(s.topic); tok.WaitTimeout(10 * time.Second) {
-			_ = tok.Error()
-		}
-	}
-	s.handWG.Wait()
+	s.handMu.Lock()
+	defer s.handMu.Unlock()
+	s.handWG.Wait() // 持锁等待：与 onMessage 的 Add 互斥，见 handMu 注释
 }
 
-// Disconnect 关闭连接（Shutdown 之后调用；等待 500ms 让 PUBACK/UNSUB 落网）。
+// Disconnect 关闭连接（Shutdown 之后调用；等待 500ms 让 PUBACK 落网）。
 func (s *Source) Disconnect() {
 	if s.client != nil && s.client.IsConnected() {
 		s.client.Disconnect(500)
