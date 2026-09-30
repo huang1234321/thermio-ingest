@@ -168,9 +168,9 @@ func (p *Pipeline) flush(b *batch) {
 		if rec := p.tsdbFailDLQ(b, err); rec != nil {
 			b.dlqs = append(b.dlqs, rec)
 		}
-		if perr := p.kafka.Produce(produceCtx, b.dlqs...); perr != nil {
+		if failed, perr := p.kafka.Produce(produceCtx, b.dlqs...); perr != nil {
 			// 双写通道全断：只剩日志与指标（OBS-MT-02：TSDB_WRITE_FAILED runbook）。
-			p.log.Error("dlq produce failed after tsdb write failure", "err", perr.Error())
+			p.log.Error("dlq produce failed after tsdb write failure", "failed", failed, "err", perr.Error())
 		}
 		p.log.Error("tsdb batch write failed, batch sent to dlq", "rows", len(rows), "err", err.Error())
 		return
@@ -179,9 +179,9 @@ func (p *Pipeline) flush(b *batch) {
 	// Kafka：raw + 质量事件 + 死信（死信独立于数据面成败，一律发）。
 	start = p.nowFunc()
 	produceAll := append(append([]*kgo.Record{}, b.recs...), b.dlqs...)
-	if perr := p.kafka.Produce(produceCtx, produceAll...); perr != nil {
+	if failed, perr := p.kafka.Produce(produceCtx, produceAll...); perr != nil {
 		// 数据已在 TSDB（真相源不丢，ADR-002）；流缺口可从 TSDB 重放补齐。
-		p.log.Error("kafka produce failed; telemetry persisted in tsdb", "records", len(produceAll), "err", perr.Error())
+		p.log.Error("kafka produce failed; telemetry persisted in tsdb", "records", len(produceAll), "failed", failed, "err", perr.Error())
 	}
 	p.met.KafkaProduceLatency.Observe(float64(p.nowFunc().Sub(start).Milliseconds()))
 

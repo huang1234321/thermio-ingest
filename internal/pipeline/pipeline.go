@@ -44,8 +44,9 @@ type Config struct {
 }
 
 // KafkaSink Kafka 生产出口（kafkaproducer.Producer 的最小投影，GO-06）。
+// Produce 返回未确认成功记录数与首个错误（部分失败精确计数，DAT-211 S5）。
 type KafkaSink interface {
-	Produce(ctx context.Context, records ...*kgo.Record) error
+	Produce(ctx context.Context, records ...*kgo.Record) (int, error)
 	Flush(ctx context.Context) error
 	Close()
 }

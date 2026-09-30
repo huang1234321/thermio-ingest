@@ -67,17 +67,32 @@ type fakeKafka struct {
 	mu                sync.Mutex
 	records           []*kgo.Record
 	failDirectQuality bool // true：单条质量事件直发报错（stale 路径，DAT-121）
+	failHalfQuality   bool // true：质量事件批内隔条失败（部分失败面，DAT-211 S5）
 }
 
-func (f *fakeKafka) Produce(ctx context.Context, recs ...*kgo.Record) error {
+func (f *fakeKafka) Produce(ctx context.Context, recs ...*kgo.Record) (int, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	// 只模拟 stale 路径的单条直发失败：批 produce（raw/事件/死信）不受影响。
 	if f.failDirectQuality && len(recs) == 1 && recs[0].Topic == kafkaproducer.TopicTelemetryQuality {
-		return fmt.Errorf("injected quality produce failure")
+		return 1, fmt.Errorf("injected quality produce failure")
+	}
+	if f.failHalfQuality && len(recs) > 0 && recs[0].Topic == kafkaproducer.TopicTelemetryQuality {
+		failed := 0
+		for i, r := range recs {
+			if i%2 == 0 { // 隔条失败：批内部分成功部分失败
+				failed++
+				continue
+			}
+			f.records = append(f.records, r)
+		}
+		if failed > 0 {
+			return failed, fmt.Errorf("injected partial quality produce failure")
+		}
+		return 0, nil
 	}
 	f.records = append(f.records, recs...)
-	return nil
+	return 0, nil
 }
 func (f *fakeKafka) Flush(ctx context.Context) error { return nil }
 func (f *fakeKafka) Close()                          {}
@@ -709,5 +724,30 @@ func TestStaleEventProduceFailureLoggedAndCounted(t *testing.T) {
 	}
 	if got := len(fk.byTopic(kafkaproducer.TopicTelemetryRaw)); got != 2 {
 		t.Errorf("raw 记录 = %d, want 2", got)
+	}
+}
+
+// DAT-211 S5：部分失败按实际失败数计——批内 2 条质量事件仅 1 条失败时计数 1
+// （原按整批 Add(len(recs)) 高估为 2）。
+func TestProduceQualityEventsPartialFailureCounted(t *testing.T) {
+	p, _, _, fk, _ := newTestPipeline(t, Config{})
+	fk.failHalfQuality = true
+	buf := &syncBuf{}
+	p.log = slog.New(slog.NewTextHandler(buf, nil)) // WARN 断言用
+	recs := []*kgo.Record{
+		qualityRecord("gw-a", "tid-1", 1, testNow, quality.EventStaleSet, nil, "trace-1"),
+		qualityRecord("gw-a", "tid-1", 2, testNow, quality.EventStaleCleared, nil, "trace-2"),
+	}
+	p.produceQualityEvents(recs)
+
+	if c := testutil.ToFloat64(p.met.QualityProduceFailures); c != 1 {
+		t.Errorf("ingest_quality_produce_failures_total = %v, want 1（部分失败按实际失败数计，非整批 2——DAT-211 S5）", c)
+	}
+	if !strings.Contains(buf.String(), "quality events produce failed") {
+		t.Errorf("WARN 日志缺失，got: %s", buf.String())
+	}
+	// 成功那条照发（部分失败不牵连批内其余记录）。
+	if got := len(fk.byTopic(kafkaproducer.TopicTelemetryQuality)); got != 1 {
+		t.Errorf("质量事件成功记录 = %d, want 1", got)
 	}
 }

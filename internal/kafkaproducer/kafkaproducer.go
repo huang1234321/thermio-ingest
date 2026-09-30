@@ -9,6 +9,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/twmb/franz-go/pkg/kgo"
@@ -49,9 +50,10 @@ func requiredOpts() []kgo.Opt {
 }
 
 // Producer 消费侧接口（GO-06：消费侧定义、小接口）。Produce 阻塞到全部记录
-// 落定（成功或失败——返回首个错误；已成功的不回滚，at-least-once）。
+// 落定，返回未确认成功记录数与首个错误（部分失败时前者为实际失败数，
+// DAT-211 S5——调用方按其计数，不按整批；已成功的不回滚，at-least-once）。
 type Producer interface {
-	Produce(ctx context.Context, records ...*kgo.Record) error
+	Produce(ctx context.Context, records ...*kgo.Record) (int, error)
 	Flush(ctx context.Context) error
 	Close()
 }
@@ -75,15 +77,18 @@ func NewBrokers(brokers []string, extra ...kgo.Opt) (*Kafka, error) {
 	return New(append(DefaultOpts(brokers), extra...)...)
 }
 
-// Produce 同步语义的批量生产：等待全部 promise 落定。
-func (k *Kafka) Produce(ctx context.Context, records ...*kgo.Record) error {
+// Produce 同步语义的批量生产：等待全部 promise 落定。返回 failed = 未确认成功
+// 记录数（落定错误数；超时取消时尚未落定者一并计入——at-least-once 下未确认
+// 即不可信，与调用侧把 err 视为失败事件同口径）与首个错误。
+func (k *Kafka) Produce(ctx context.Context, records ...*kgo.Record) (int, error) {
 	if len(records) == 0 {
-		return nil
+		return 0, nil
 	}
 	var (
-		wg       sync.WaitGroup
-		mu       sync.Mutex
-		firstErr error
+		wg        sync.WaitGroup
+		mu        sync.Mutex
+		firstErr  error
+		succeeded atomic.Int64
 	)
 	wg.Add(len(records))
 	for _, rec := range records {
@@ -96,17 +101,27 @@ func (k *Kafka) Produce(ctx context.Context, records ...*kgo.Record) error {
 					firstErr = fmt.Errorf("produce topic=%s key=%s: %w", r.Topic, string(r.Key), err)
 				}
 				mu.Unlock()
+				return
 			}
+			succeeded.Add(1)
 		})
 	}
 	done := make(chan struct{})
 	go func() { wg.Wait(); close(done) }()
+	var err error
 	select {
 	case <-done:
-		return firstErr
+		err = firstErr // 全部 promise 已落定：无并发写，直读安全
 	case <-ctx.Done():
-		return fmt.Errorf("produce canceled: %w", ctx.Err())
+		// 取消路径可能仍有 promise 在落定——firstErr 读取须持锁（竞态纪律）
+		mu.Lock()
+		err = firstErr
+		mu.Unlock()
+		if err == nil {
+			err = fmt.Errorf("produce canceled: %w", ctx.Err())
+		}
 	}
+	return len(records) - int(succeeded.Load()), err
 }
 
 // Flush 排空在途记录（优雅退出 §12：冲 producer）。

@@ -298,16 +298,19 @@ func qualityRecord(gatewayID, tenantID string, pointID int64, ts time.Time, even
 
 // produceQualityEvents 批量直发质量事件（stale_set / stale_cleared，产生于写入
 // 成功后的状态推进与后台扫描；单次 Produce 等待全部 promise 落定——聚合面，
-// DAT-202 D-38：消除逐条同步 produce 的串行阻塞窗口）。
+// DAT-202 D-38：消除逐条同步 produce 的串行阻塞窗口；DAT-211 S5：失败计数按
+// 实际失败条数，部分失败不高估）。
 func (p *Pipeline) produceQualityEvents(recs []*kgo.Record) {
 	if len(recs) == 0 {
 		return
 	}
 	pctx, cancel := context.WithTimeout(context.Background(), p.cfg.ProduceTimeout)
 	defer cancel()
-	if err := p.kafka.Produce(pctx, recs...); err != nil {
-		p.met.QualityProduceFailures.Add(float64(len(recs)))
-		p.log.Warn("quality events produce failed", "count", len(recs), "err", err.Error())
+	if failed, err := p.kafka.Produce(pctx, recs...); err != nil {
+		// 部分失败按实际失败数计（DAT-211 S5）：整批计在高估面——批内单条
+		// 失败曾虚增为 N。
+		p.met.QualityProduceFailures.Add(float64(failed))
+		p.log.Warn("quality events produce failed", "count", len(recs), "failed", failed, "err", err.Error())
 	}
 }
 
