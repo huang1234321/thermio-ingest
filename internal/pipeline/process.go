@@ -296,15 +296,18 @@ func qualityRecord(gatewayID, tenantID string, pointID int64, ts time.Time, even
 	return rec
 }
 
-// produceQualityEvent 直发单条质量事件（stale_set / stale_cleared，产生于写入
-// 周期之外，不随批走）。失败不吞（CODE-ST-01，DAT-121）：WARN + 指标——事件非
-// 真相源（遥测已在 TSDB），不进 DLQ、不重试。
-func (p *Pipeline) produceQualityEvent(rec *kgo.Record) {
+// produceQualityEvents 批量直发质量事件（stale_set / stale_cleared，产生于写入
+// 成功后的状态推进与后台扫描；单次 Produce 等待全部 promise 落定——聚合面，
+// DAT-202 D-38：消除逐条同步 produce 的串行阻塞窗口）。
+func (p *Pipeline) produceQualityEvents(recs []*kgo.Record) {
+	if len(recs) == 0 {
+		return
+	}
 	pctx, cancel := context.WithTimeout(context.Background(), p.cfg.ProduceTimeout)
 	defer cancel()
-	if err := p.kafka.Produce(pctx, rec); err != nil {
-		p.met.QualityProduceFailures.Inc()
-		p.log.Warn("quality event produce failed", "topic", rec.Topic, "key", string(rec.Key), "err", err.Error())
+	if err := p.kafka.Produce(pctx, recs...); err != nil {
+		p.met.QualityProduceFailures.Add(float64(len(recs)))
+		p.log.Warn("quality events produce failed", "count", len(recs), "err", err.Error())
 	}
 }
 

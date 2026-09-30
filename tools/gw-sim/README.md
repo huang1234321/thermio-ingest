@@ -106,15 +106,15 @@ IMPL-7/8 落地后：凭证改由平台 `POST /internal/mqtt/authenticate` 链�
 mosquitto_pub -h localhost -p 1883 -u '<内部账号>' \
   -t thermio/gw/GW-SIM-001/down/write -q 1 -m '{
     "msg_type":"write_cmd","ver":1,"cmd_id":"c1",
-    "sent_at":"2026-09-26T15:00:00+08:00",
-    "writes":[{"name":"SIM_SP_0001","value":7.5}]}'
+    "issued_at":"2026-09-26T15:00:00+08:00","expires_in_s":30,
+    "point_ref":"SIM_SP_0001","value":7.5}'
 
-# 写后回读 → up/event 收 read_ack
+# 写后回读 → up/event 收 read_result
 mosquitto_pub -h localhost -p 1883 -u '<内部账号>' \
   -t thermio/gw/GW-SIM-001/down/read -q 1 -m '{
     "msg_type":"read_cmd","ver":1,"cmd_id":"c2",
-    "sent_at":"2026-09-26T15:00:05+08:00",
-    "names":["SIM_SP_0001"]}'
+    "issued_at":"2026-09-26T15:00:05+08:00","expires_in_s":30,
+    "point_ref":"SIM_SP_0001"}'
 
 # 观察应答
 mosquitto_sub -h localhost -p 1883 -u '<内部账号>' \
@@ -128,15 +128,17 @@ mosquitto_sub -h localhost -p 1883 -u '<内部账号>' \
 | 写失败注入 | 复制 downlink-echo.json 改 `downlink.write_fail_rate: 1.0` 后运行 | write_ack(status=failed) |
 | 越界写 | 运行任一下行 profile，向 SIM_SP_* 写 [-∞,0)∪(100,+∞) 值 | write_ack(status=rejected, detail=值域) |
 
-**下行 v0 契约**（本工具单方面提案，待 IMPL-18 control-safety 落地时对齐；
-flows.md §2 已定义语义，JSON 信封未钉死——分歧在 DAT-109 跟踪）：
+**下行契约（定稿，已对齐）**：control-safety.md §4.2/§4.3 + shared-types
+`ControlWriteCommand`/`ControlUpEvent`（DAT-109 分歧收口——G4 预演 DAT-202 实跑对齐）：
 
-- `down/write`：`{"msg_type":"write_cmd","ver":1,"cmd_id","sent_at","writes":[{"name","value"}]}`
-- `down/read`：`{"msg_type":"read_cmd","ver":1,"cmd_id","sent_at","names":[...]}`
-- 应答（`up/event`，ingest.md §2 预留的自报事件通道）：
-  `{"msg_type":"write_ack","ver":1,"cmd_id","gw","sent_at","results":[{"name","status","written?","detail?"}]}`
-  / `{"msg_type":"read_ack","ver":1,"cmd_id","gw","sent_at","values":[{"name","value","ts"}]}`
-- `status ∈ ok | unknown_point | rejected | failed`
+- `down/write`：`{"msg_type":"write_cmd","ver":1,"cmd_id","point_ref","value","unit?","issued_at","expires_in_s"}`
+- `down/read`：`{"msg_type":"read_cmd","ver":1,"cmd_id","point_ref","issued_at","expires_in_s"}`
+- 应答（`up/event`，ingest.md §2 预留的自报事件通道；`gw` = clientid，与 topic 一致）：
+  `{"msg_type":"write_ack","ver":1,"cmd_id","gw","result":"accepted|rejected","code":null|"POINT_UNKNOWN"|"WRITE_REFUSED"|"CMD_EXPIRED","at"}`
+  / `{"msg_type":"read_result","ver":1,"cmd_id","gw","value","unit","quality":"good|bad","ts","at"}`
+- 语义映射：旧 `ok` → `accepted`；`unknown_point` → `rejected+POINT_UNKNOWN`；
+  越界/缺 value → `rejected+WRITE_REFUSED`；过期 → `rejected+CMD_EXPIRED`；
+  **写失败注入 → 不应答**（§4.4 超时路径，回读仲裁兜底）
 
 ## Profile 结构速览
 

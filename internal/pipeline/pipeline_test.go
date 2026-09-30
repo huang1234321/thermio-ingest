@@ -700,7 +700,7 @@ func TestStaleEventProduceFailureLoggedAndCounted(t *testing.T) {
 		t.Errorf("ingest_quality_produce_failures_total = %v, want 2（stale_set + stale_cleared）", c)
 	}
 	logs := buf.String()
-	if !strings.Contains(logs, "quality event produce failed") {
+	if !strings.Contains(logs, "quality events produce failed") {
 		t.Errorf("WARN 日志缺失，got: %s", logs)
 	}
 	// 数据面不受牵连：两行照落、raw 照发。

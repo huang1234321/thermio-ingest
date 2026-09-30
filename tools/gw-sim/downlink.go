@@ -2,94 +2,87 @@ package main
 
 import (
 	"encoding/json"
-	"fmt"
 	"log/slog"
 	"math/rand"
 	"sync"
 	"time"
 )
 
-// 下行通道 v0 契约（gw-sim 侧提案，待 IMPL-18 control-safety 落地时对齐——
-// 设计文档 flows.md §2 序列已定义「写指令→写应答→回读指令→回读值」语义，
-// JSON 信封未钉死；本文件给出可联调的最小实现，分歧在 DAT-109 评论跟踪）：
+// 下行通道契约（control-safety.md §4.2/§4.3 定稿；shared-types ControlWriteCommand /
+// ControlUpEvent 单源对齐——DAT-109 契约分歧收口，G4 预演 DAT-202 实跑对齐）：
 //
-//	down/write（中台 → 网关）：
-//	  {"msg_type":"write_cmd","ver":1,"cmd_id":"...","sent_at":"...",
-//	   "writes":[{"name":"SIM_SP_0001","value":7.5}]}
-//	down/read（中台 → 网关，写后回读验证）：
-//	  {"msg_type":"read_cmd","ver":1,"cmd_id":"...","sent_at":"...","names":[...]}
-//	应答统一发 thermio/gw/{clientid}/up/event（ingest.md §2 预留的自报事件通道）：
-//	  {"msg_type":"write_ack","ver":1,"cmd_id":"...","gw":"...","sent_at":"...",
-//	   "results":[{"name":"...","status":"ok","written":7.5}]}
-//	  {"msg_type":"read_ack","ver":1,"cmd_id":"...","gw":"...","sent_at":"...",
-//	   "values":[{"name":"...","value":7.5,"ts":"..."}]}
+//	down/write（中台 svc-control → 网关，QoS1）：
+//	  {"msg_type":"write_cmd","ver":1,"cmd_id":"<uuid>","point_ref":"SIM_SP_0001",
+//	   "value":7.5,"unit":"degC","issued_at":"...","expires_in_s":30}
+//	down/read（写后回读验证，同 topic，msg_type 区分）：
+//	  {"msg_type":"read_cmd","ver":1,"cmd_id":"<uuid>","point_ref":"SIM_SP_0001",
+//	   "issued_at":"...","expires_in_s":30}
+//	应答统一发 thermio/gw/{clientid}/up/event：
+//	  {"msg_type":"write_ack","ver":1,"cmd_id":"...","gw":"<clientid>",
+//	   "result":"accepted","code":null,"at":"..."}
+//	  {"msg_type":"read_result","ver":1,"cmd_id":"...","gw":"<clientid>",
+//	   "value":7.5,"unit":null,"quality":"good","ts":"...","at":"..."}
 //
-// status ∈ ok | unknown_point | rejected（越界）| failed（通讯失败注入）。
+// 语义映射（旧 v0 批量形态 → 定稿单点形态）：
+//   - ok              → result=accepted, code=null
+//   - unknown_point   → result=rejected, code=POINT_UNKNOWN
+//   - 越界 / 缺 value → result=rejected, code=WRITE_REFUSED
+//   - 指令过期        → result=rejected, code=CMD_EXPIRED（expires_in_s 窗口外）
+//   - 写失败注入      → 不应答（§4.4 超时路径：null ack 交回读仲裁）
+//
+// gw 字段 = MQTT clientid（§4.3：payload.gw 必须与 topic clientid 一致，否则对端丢弃）。
 
 const (
-	msgTypeWriteCmd = "write_cmd"
-	msgTypeReadCmd  = "read_cmd"
-	msgTypeWriteAck = "write_ack"
-	msgTypeReadAck  = "read_ack"
+	msgTypeWriteCmd   = "write_cmd"
+	msgTypeReadCmd    = "read_cmd"
+	msgTypeWriteAck   = "write_ack"
+	msgTypeReadResult = "read_result"
+
+	ackAccepted = "accepted"
+	ackRejected = "rejected"
+
+	codePointUnknown = "POINT_UNKNOWN"
+	codeWriteRefused = "WRITE_REFUSED"
+	codeCmdExpired   = "CMD_EXPIRED"
+
+	qualityGood = "good"
+	qualityBad  = "bad"
 )
 
-// WriteCmd 下行写指令。
+// WriteCmd 下行写/读指令（定稿信封：单 point_ref；read_cmd 无 value/unit）。
 type WriteCmd struct {
-	MsgType string      `json:"msg_type"`
-	Ver     int         `json:"ver"`
-	CmdID   string      `json:"cmd_id"`
-	SentAt  string      `json:"sent_at"`
-	Writes  []WriteItem `json:"writes"`
+	MsgType    string   `json:"msg_type"`
+	Ver        int      `json:"ver"`
+	CmdID      string   `json:"cmd_id"`
+	PointRef   string   `json:"point_ref"`
+	Value      *float64 `json:"value"`
+	Unit       *string  `json:"unit"`
+	IssuedAt   string   `json:"issued_at"`
+	ExpiresInS *int64   `json:"expires_in_s"`
 }
 
-// WriteItem 单条写项。
-type WriteItem struct {
-	Name  string   `json:"name"`
-	Value *float64 `json:"value"`
+// WriteAck 写应答（up/event，定稿单点形态）。
+type WriteAck struct {
+	MsgType string  `json:"msg_type"`
+	Ver     int     `json:"ver"`
+	CmdID   string  `json:"cmd_id"`
+	GW      string  `json:"gw"`
+	Result  string  `json:"result"`
+	Code    *string `json:"code"`
+	At      string  `json:"at"`
 }
 
-// ReadCmd 下行回读指令。
-type ReadCmd struct {
+// ReadResult 回读应答（up/event，定稿单点形态；quality≠good 对端按读失败计）。
+type ReadResult struct {
 	MsgType string   `json:"msg_type"`
 	Ver     int      `json:"ver"`
 	CmdID   string   `json:"cmd_id"`
-	SentAt  string   `json:"sent_at"`
-	Names   []string `json:"names"`
-}
-
-// WriteAck 写应答（up/event）。
-type WriteAck struct {
-	MsgType string        `json:"msg_type"`
-	Ver     int           `json:"ver"`
-	CmdID   string        `json:"cmd_id"`
-	GW      string        `json:"gw"`
-	SentAt  string        `json:"sent_at"`
-	Results []WriteResult `json:"results"`
-}
-
-// WriteResult 单点写结果。
-type WriteResult struct {
-	Name    string   `json:"name"`
-	Status  string   `json:"status"`
-	Written *float64 `json:"written,omitempty"`
-	Detail  string   `json:"detail,omitempty"`
-}
-
-// ReadAck 回读应答（up/event）。
-type ReadAck struct {
-	MsgType string      `json:"msg_type"`
-	Ver     int         `json:"ver"`
-	CmdID   string      `json:"cmd_id"`
-	GW      string      `json:"gw"`
-	SentAt  string      `json:"sent_at"`
-	Values  []ReadValue `json:"values"`
-}
-
-// ReadValue 单点回读值（含设备侧采集时刻）。
-type ReadValue struct {
-	Name  string   `json:"name"`
-	Value *float64 `json:"value"`
-	TS    string   `json:"ts"`
+	GW      string   `json:"gw"`
+	Value   *float64 `json:"value"`
+	Unit    *string  `json:"unit"`
+	Quality string   `json:"quality"`
+	TS      *string  `json:"ts"`
+	At      string   `json:"at"`
 }
 
 // DownlinkState 网关侧下行通道状态：寄存器值 + 写入域 + 回读策略。
@@ -139,8 +132,8 @@ func (d *DownlinkState) RegisterValue(name string) (float64, bool) {
 	return v, ok
 }
 
-// HandleMessage 处理一条下行消息，返回应答字节（不识别/解析失败返回 nil）。
-func (d *DownlinkState) HandleMessage(payload []byte, gwSerial string, now time.Time) []byte {
+// HandleMessage 处理一条下行消息，返回应答字节（不识别/解析失败/写失败注入返回 nil）。
+func (d *DownlinkState) HandleMessage(payload []byte, gwClientID string, now time.Time) []byte {
 	var probe struct {
 		MsgType string `json:"msg_type"`
 	}
@@ -150,57 +143,68 @@ func (d *DownlinkState) HandleMessage(payload []byte, gwSerial string, now time.
 	}
 	switch probe.MsgType {
 	case msgTypeWriteCmd:
-		return d.handleWrite(payload, gwSerial, now)
+		return d.handleWrite(payload, gwClientID, now)
 	case msgTypeReadCmd:
-		return d.handleRead(payload, gwSerial, now)
+		return d.handleRead(payload, gwClientID, now)
 	default:
 		d.logger.Warn("downlink: unknown msg_type ignored", "msg_type", probe.MsgType)
 		return nil
 	}
 }
 
-// handleWrite 处理写指令：值域校验 → 寄存器更新（按回读策略）→ 应答。
-func (d *DownlinkState) handleWrite(payload []byte, gwSerial string, now time.Time) []byte {
+// writeAckOf 构造写应答字节（marshal 失败返回 nil）。
+func writeAckOf(cmdID, gwClientID, result string, code *string, now time.Time) []byte {
+	b, err := json.Marshal(WriteAck{
+		MsgType: msgTypeWriteAck, Ver: 1, CmdID: cmdID,
+		GW: gwClientID, Result: result, Code: code, At: now.Format(sentAtLayout),
+	})
+	if err != nil {
+		return nil
+	}
+	return b
+}
+
+// expired 指令时效判定（issued_at + expires_in_s 窗口外 = 过期；不可解析字段宽容忽略）。
+func (d *DownlinkState) expired(cmd WriteCmd, now time.Time) bool {
+	if cmd.IssuedAt == "" || cmd.ExpiresInS == nil || *cmd.ExpiresInS <= 0 {
+		return false
+	}
+	issued, err := time.Parse(time.RFC3339, cmd.IssuedAt)
+	if err != nil {
+		return false // 解析失败不拦执行（对端时钟格式问题不应吞指令）
+	}
+	return now.After(issued.Add(time.Duration(*cmd.ExpiresInS) * time.Second))
+}
+
+// handleWrite 处理写指令：时效/值域校验 → 寄存器更新（按回读策略）→ 应答。
+// 写失败注入（write_fail_rate）= 不应答：§4.4 超时路径，null ack 交对端回读仲裁。
+func (d *DownlinkState) handleWrite(payload []byte, gwClientID string, now time.Time) []byte {
 	var cmd WriteCmd
 	if err := json.Unmarshal(payload, &cmd); err != nil {
 		d.logger.Warn("downlink: bad write_cmd dropped", "err", err.Error())
 		return nil
 	}
-	ack := WriteAck{
-		MsgType: msgTypeWriteAck, Ver: 1, CmdID: cmd.CmdID,
-		GW: gwSerial, SentAt: now.Format(sentAtLayout),
-		Results: make([]WriteResult, 0, len(cmd.Writes)),
+	switch {
+	case d.expired(cmd, now):
+		return writeAckOf(cmd.CmdID, gwClientID, ackRejected, strPtr(codeCmdExpired), now)
+	case cmd.Value == nil:
+		return writeAckOf(cmd.CmdID, gwClientID, ackRejected, strPtr(codeWriteRefused), now)
 	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	for _, w := range cmd.Writes {
-		res := WriteResult{Name: w.Name, Written: w.Value}
-		switch {
-		case w.Value == nil:
-			res.Status = "rejected"
-			res.Detail = "value required"
-		case !d.knownSetpoint(w.Name):
-			res.Status = "unknown_point"
-			res.Detail = "not a simulated setpoint"
-		case *w.Value < d.writeMin || *w.Value > d.writeMax:
-			res.Status = "rejected"
-			res.Detail = fmt.Sprintf("value %v out of [%v,%v]", *w.Value, d.writeMin, d.writeMax)
-		case d.cfg.WriteFailRate > 0 && d.rng.Float64() < d.cfg.WriteFailRate:
-			res.Status = "failed"
-			res.Detail = "injected register-write comm failure"
-			res.Written = nil
-		default:
-			d.applyWrite(w.Name, *w.Value, now)
-			res.Status = "ok"
-		}
-		ack.Results = append(ack.Results, res)
-	}
-	b, err := json.Marshal(ack)
-	if err != nil {
-		d.logger.Error("downlink: marshal write_ack", "err", err.Error())
+	switch {
+	case !d.knownSetpoint(cmd.PointRef):
+		return writeAckOf(cmd.CmdID, gwClientID, ackRejected, strPtr(codePointUnknown), now)
+	case *cmd.Value < d.writeMin || *cmd.Value > d.writeMax:
+		return writeAckOf(cmd.CmdID, gwClientID, ackRejected, strPtr(codeWriteRefused), now)
+	case d.cfg.WriteFailRate > 0 && d.rng.Float64() < d.cfg.WriteFailRate:
+		// 注入形态：寄存器写通讯失败——不应答（超时路径），遥测/回读维持旧值。
+		d.logger.Warn("downlink: injected register-write comm failure", "cmd_id", cmd.CmdID)
 		return nil
+	default:
+		d.applyWrite(cmd.PointRef, *cmd.Value, now)
 	}
-	return b
+	return writeAckOf(cmd.CmdID, gwClientID, ackAccepted, nil, now)
 }
 
 // knownSetpoint 点位是否为已注册设定值（调用方持锁）。
@@ -221,38 +225,34 @@ func (d *DownlinkState) applyWrite(name string, v float64, now time.Time) {
 	}
 }
 
-// handleRead 处理回读指令：按策略组值。
-func (d *DownlinkState) handleRead(payload []byte, gwSerial string, now time.Time) []byte {
-	var cmd ReadCmd
+// handleRead 处理回读指令：按策略组值（unknown point → value null + quality bad）。
+func (d *DownlinkState) handleRead(payload []byte, gwClientID string, now time.Time) []byte {
+	var cmd WriteCmd // read_cmd 与 write_cmd 同信封（无 value/unit）
 	if err := json.Unmarshal(payload, &cmd); err != nil {
 		d.logger.Warn("downlink: bad read_cmd dropped", "err", err.Error())
 		return nil
 	}
-	ack := ReadAck{
-		MsgType: msgTypeReadAck, Ver: 1, CmdID: cmd.CmdID,
-		GW: gwSerial, SentAt: now.Format(sentAtLayout),
-		Values: make([]ReadValue, 0, len(cmd.Names)),
-	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	for _, name := range cmd.Names {
-		rv := ReadValue{Name: name, TS: FormatTS(now)}
-		reg, ok := d.registers[name]
-		switch {
-		case !ok:
-			rv.Value = nil // unknown point：value null（对端自行判定）
-		default:
-			v := d.readbackValue(name, reg)
-			rv.Value = &v
-			if ts, ok := d.lastWriteTS[name]; ok {
-				rv.TS = FormatTS(ts)
-			}
-		}
-		ack.Values = append(ack.Values, rv)
+	res := ReadResult{
+		MsgType: msgTypeReadResult, Ver: 1, CmdID: cmd.CmdID,
+		GW: gwClientID, Value: nil, Unit: nil,
+		Quality: qualityBad, At: now.Format(sentAtLayout),
 	}
-	b, err := json.Marshal(ack)
+	if reg, ok := d.registers[cmd.PointRef]; ok {
+		v := d.readbackValue(cmd.PointRef, reg)
+		ts := now
+		if t, ok := d.lastWriteTS[cmd.PointRef]; ok {
+			ts = t
+		}
+		formatted := FormatTS(ts)
+		res.Value = &v
+		res.Quality = qualityGood
+		res.TS = &formatted
+	}
+	b, err := json.Marshal(res)
 	if err != nil {
-		d.logger.Error("downlink: marshal read_ack", "err", err.Error())
+		d.logger.Error("downlink: marshal read_result", "err", err.Error())
 		return nil
 	}
 	return b
@@ -269,3 +269,5 @@ func (d *DownlinkState) readbackValue(name string, reg float64) float64 {
 		return reg
 	}
 }
+
+func strPtr(s string) *string { return &s }
