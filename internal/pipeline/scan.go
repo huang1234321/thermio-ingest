@@ -2,8 +2,8 @@
 package pipeline
 
 import (
-	"github.com/twmb/franz-go/pkg/kgo"
 	"context"
+	"github.com/twmb/franz-go/pkg/kgo"
 	"time"
 
 	"github.com/huang1234321/thermio-ingest/internal/quality"
