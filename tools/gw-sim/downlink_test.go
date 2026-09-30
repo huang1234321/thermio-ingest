@@ -117,6 +117,30 @@ func TestReadResultUnknownPoint(t *testing.T) {
 	}
 }
 
+// TestReadResultExpired 过期 read_cmd → value null + quality bad（与 write 同判，
+// control-safety §4 信封 expires_in_s 对两形态生效——DAT-211 对齐；不以新读数
+// 背书旧指令）。helper readCmd 不带 expires_in_s，此处走原始报文。
+func TestReadResultExpired(t *testing.T) {
+	d := mkDown(DownlinkCfg{Enabled: true, Readback: "echo"})
+	stale := time.Now().Add(-2 * time.Minute)
+	resp := d.HandleMessage([]byte(`{"msg_type":"read_cmd","ver":1,"cmd_id":"c9","point_ref":"SIM_SP_0001","issued_at":"`+stale.Format(time.RFC3339)+`","expires_in_s":30}`), gwClientID, time.Now())
+	if resp == nil {
+		t.Fatal("no read_result")
+	}
+	var res ReadResult
+	if err := json.Unmarshal(resp, &res); err != nil {
+		t.Fatalf("not read_result: %v", err)
+	}
+	if res.Value != nil || res.Quality != qualityBad {
+		t.Errorf("expired read_result = %+v, want value nil + quality bad", res)
+	}
+	// 时效窗口内的同指令仍正常回读（对照：过期判定不误伤新鲜指令）。
+	fresh := readCmd(t, d, "SIM_SP_0001", time.Now())
+	if fresh.Quality != qualityGood || fresh.Value == nil {
+		t.Errorf("fresh read_result = %+v, want good", fresh)
+	}
+}
+
 // TestReadbackMismatchModes 回读不一致注入三种形态（IMPL-18 回滚演练）。
 func TestReadbackMismatchModes(t *testing.T) {
 	now := time.Now()

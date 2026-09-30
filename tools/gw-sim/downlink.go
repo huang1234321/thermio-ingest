@@ -226,6 +226,9 @@ func (d *DownlinkState) applyWrite(name string, v float64, now time.Time) {
 }
 
 // handleRead 处理回读指令：按策略组值（unknown point → value null + quality bad）。
+// 过期 read_cmd 与 write 同判（control-safety §4 信封 expires_in_s 对 write_cmd/
+// read_cmd 两形态同列生效——DAT-211 清理轮对齐）：不以新读数背书旧指令，回
+// value null + quality bad（对端按读失败/超时节奏处理，§5.2）。
 func (d *DownlinkState) handleRead(payload []byte, gwClientID string, now time.Time) []byte {
 	var cmd WriteCmd // read_cmd 与 write_cmd 同信封（无 value/unit）
 	if err := json.Unmarshal(payload, &cmd); err != nil {
@@ -239,7 +242,7 @@ func (d *DownlinkState) handleRead(payload []byte, gwClientID string, now time.T
 		GW: gwClientID, Value: nil, Unit: nil,
 		Quality: qualityBad, At: now.Format(sentAtLayout),
 	}
-	if reg, ok := d.registers[cmd.PointRef]; ok {
+	if reg, ok := d.registers[cmd.PointRef]; ok && !d.expired(cmd, now) {
 		v := d.readbackValue(cmd.PointRef, reg)
 		ts := now
 		if t, ok := d.lastWriteTS[cmd.PointRef]; ok {
